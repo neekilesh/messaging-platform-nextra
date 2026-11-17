@@ -1,0 +1,1284 @@
+Below is your **complete NEXORA Master Development Prompt**. You can copy and paste it into an AI coding agent such as Cursor, Claude Code, Windsurf, or another autonomous software development agent.
+
+This prompt is designed to make the coding agent behave like a senior software architect, UI/UX designer, security engineer, and full-stack developer—not simply generate a few screens.
+
+It covers the product vision, functionality, architecture, database, file organization, encryption, authentication, animations, testing, and deployment.
+
+# **NEXORA — Master Development Prompt**
+
+**Project specification**
+
+Full-stack application
+
+# **NEXORA**
+
+*A magical world of private connections.*
+
+Identity
+
+**Unique username**
+
+Verification
+
+**Gmail / email OTP**
+
+Group capacity
+
+**25 members**
+
+Security
+
+**End-to-end encryption**
+
+# NEXORA — COMPLETE MASTER DEVELOPMENT PROMPT
+
+## 1. YOUR ROLE
+
+Act as a world-class senior software architect, full-stack engineer, cybersecurity engineer, database architect, UI/UX designer, animation specialist, and QA engineer.
+
+Your responsibility is to design and build a complete, production-oriented messaging application called **NEXORA**.
+
+Do not build a simple WhatsApp clone. Build a distinctive, futuristic, magical messaging platform with extraordinary user experiences, smooth animations, reliable real-time communication, and strong end-to-end encryption.
+
+You must work systematically, maintain a clean codebase, manage files properly, and implement working features rather than decorative placeholders.
+
+Do not stop after creating the frontend. Build the complete application, including its backend, database, authentication, real-time communication, security, and deployment configuration.
+
+---
+
+# 2. PRODUCT IDENTITY
+
+**Application name:** NEXORA
+
+**Tagline:** Your Identity. Your World. Your Connections.
+
+**Product category:** Secure social messaging application.
+
+### Product vision
+
+NEXORA is a next-generation communication platform combining:
+
+- WhatsApp-style private messaging.
+- Snapchat-inspired stories and streaks.
+- Modern group conversations.
+- Voice messaging.
+- Photo and video sharing.
+- Disappearing messages.
+- Extraordinary magical interface interactions.
+- Strong end-to-end encryption.
+
+The application should feel like entering a futuristic digital universe rather than opening an ordinary messaging application.
+
+Every important interaction should feel polished, immersive, and memorable.
+
+---
+
+# 3. STRICT PRODUCT REQUIREMENTS
+
+These requirements are mandatory.
+
+| Requirement               | Specification              |
+| ------------------------- | -------------------------- |
+| Account identity          | Unique username            |
+| Registration verification | Gmail/email OTP            |
+| Phone number              | Not required               |
+| Private messaging         | One-to-one                 |
+| Group messaging           | Up to 25 members per group |
+| Voice messages            | Supported                  |
+| Photo sharing             | Supported                  |
+| Video sharing             | Supported                  |
+| Stories                   | 24-hour stories            |
+| Streaks                   | Friend streak system       |
+| Disappearing messages     | Supported                  |
+| End-to-end encryption     | Mandatory                  |
+| Voice calls               | Not included               |
+| Video calls               | Not included               |
+| Camera filters            | Not included               |
+| Magical interface         | Mandatory                  |
+
+The system must support more than 25 registered users overall. Each group must have a maximum of 25 members, including its creator.
+
+Never add calling features, video calling, camera filters, or unnecessary features outside the approved product scope.
+
+---
+
+# 4. ACCOUNT REGISTRATION AND AUTHENTICATION
+
+Create a secure username-based authentication system.
+
+### Registration process
+
+1. User opens NEXORA.
+2. User selects Create Account.
+3. User enters their Gmail/email address.
+4. System sends a six-digit verification OTP.
+5. User enters the OTP.
+6. System validates the OTP.
+7. User chooses a unique username.
+8. User enters a display name.
+9. User creates a strong password.
+10. User optionally uploads a profile picture.
+11. Account is successfully created.
+
+### Username requirements
+
+- Every username must be unique.
+- Usernames must be searchable.
+- Username changes must be controlled.
+- Support username availability checking.
+- Use a normalized username field for uniqueness.
+- Users must be discoverable without knowing their email address.
+- Never expose private email addresses through public profile searches.
+
+Example usernames:
+
+- @ShadowKing
+- @MysticSoul
+- @MoonLight
+- @CyberGhost
+- @GalaxyQueen
+
+### Authentication security
+
+Implement:
+
+- Secure password hashing using Argon2id.
+- Short-lived OTP verification codes.
+- OTP expiration.
+- OTP resend cooldown.
+- Rate limiting.
+- Brute-force protection.
+- Secure session management.
+- Password reset through verified email.
+- Account logout.
+- Device/session management.
+
+Use a transactional email service or properly configured SMTP provider. Gmail addresses can be used for verification, but do not depend on a personal Gmail account as the application's authentication database.
+
+Never store plaintext passwords or OTPs.
+
+---
+
+# 5. PRIVATE ONE-TO-ONE MESSAGING
+
+This is one of the most important features.
+
+Two users must be able to communicate privately using their unique usernames.
+
+### Required functionality
+
+- Search users by username.
+- View user profiles.
+- Send chat requests.
+- Accept or reject requests.
+- Start private conversations.
+- Send text messages.
+- Receive messages in real time.
+- Edit messages.
+- Delete messages.
+- Reply to individual messages.
+- React to messages.
+- Forward messages.
+- Copy messages.
+- Pin important messages.
+- Share photos.
+- Share videos.
+- Send voice messages.
+- Send documents.
+- Typing indicators.
+- Online/offline status.
+- Message delivery indicators.
+- Read receipts.
+- Conversation search.
+- Mute conversations.
+- Archive conversations.
+- Block users.
+- Report users.
+
+### Message statuses
+
+Implement the following states:
+
+1. Sending.
+2. Sent.
+3. Delivered.
+4. Read.
+5. Failed.
+
+Use meaningful visual indicators for each state.
+
+Messages must synchronize across authorized user devices.
+
+---
+
+# 6. GROUP MESSAGING SYSTEM
+
+Users must be able to create their own groups.
+
+### Group capacity
+
+Maximum 25 members per group, including the creator.
+
+### Group creation
+
+Allow users to:
+
+- Create a group.
+- Enter a group name.
+- Upload a group profile picture.
+- Add members using usernames.
+- Set a group description.
+- Choose group privacy settings.
+- Create the group.
+
+### Group features
+
+- Real-time group messaging.
+- Group voice messages.
+- Group photo sharing.
+- Group video sharing.
+- Reply to specific messages.
+- Message reactions.
+- Message forwarding.
+- Group message search.
+- Group member lists.
+- Group notifications.
+- Group media gallery.
+- Group disappearing messages.
+- Add and remove members.
+- Leave groups.
+- Delete groups when authorized.
+
+### Administration
+
+Implement group roles:
+
+**Owner**
+
+- Full group control.
+- Manage administrators.
+- Manage group settings.
+- Add and remove members.
+- Delete the group.
+
+**Administrator**
+
+- Manage members according to permissions.
+- Moderate conversations.
+- Update group information.
+
+**Member**
+
+- Send messages.
+- Share media.
+- React and reply.
+- View group information.
+
+Enforce the 25-member limit on the backend, not only in the interface.
+
+When adding members, use a secure group key-management process. Newly added members must not automatically gain access to previously protected conversation history unless explicitly authorized.
+
+---
+
+# 7. VOICE MESSAGING
+
+Voice messaging must be fully functional.
+
+### Features
+
+- Press and hold to record.
+- Swipe to cancel recording.
+- Release to send.
+- Playback controls.
+- Pause and resume.
+- Playback speed options.
+- Voice message duration.
+- Waveform visualization.
+- Recording animation.
+- Message delivery status.
+
+Create beautiful animated sound waves.
+
+The waveform should react to the recorded audio.
+
+Do not create audio or video calling functionality.
+
+---
+
+# 8. PHOTO AND VIDEO SHARING
+
+Implement secure media sharing.
+
+### Photo features
+
+- Select photos from the device.
+- Upload photos.
+- Send photos privately.
+- Send photos to groups.
+- Preview images.
+- Full-screen viewing.
+- Download controls where permitted.
+- Image compression before encryption and upload.
+
+### Video features
+
+- Select videos.
+- Upload videos.
+- Send videos privately.
+- Send videos to groups.
+- Video previews.
+- Playback controls.
+- Duration indicators.
+- Video thumbnails.
+
+### Media security
+
+- Encrypt media before uploading it to storage.
+- Keep encryption keys separate from stored media.
+- Use authenticated encryption.
+- Use short-lived download authorization.
+- Never expose public media URLs containing accessible private content.
+- Validate file types and file sizes.
+- Prevent unauthorized media access.
+
+Provide clear upload progress and error handling.
+
+---
+
+# 9. SNAPCHAT-INSPIRED STORIES
+
+Implement a Stories feature.
+
+### Story functionality
+
+- Upload photo stories.
+- Upload video stories.
+- Stories automatically expire after 24 hours.
+- Display friends' stories.
+- Show story viewing progress.
+- Show viewers to the story owner.
+- Allow story reactions.
+- Allow replies through private messaging.
+- Allow users to control story visibility.
+- Allow users to delete their stories.
+- Support story privacy settings.
+
+Stories must also be end-to-end encrypted.
+
+### Story interface
+
+Use circular profile previews with animated progress borders.
+
+Viewed stories should have a different visual appearance from unviewed stories.
+
+Create smooth transitions when opening and closing stories.
+
+---
+
+# 10. FRIEND STREAK SYSTEM
+
+Implement a Snapchat-inspired streak system.
+
+### Features
+
+- Users can maintain streaks with friends.
+- Show the current streak count.
+- Display a flame icon.
+- Reset streaks when the required activity window expires.
+- Show streak reminders.
+- Show streak milestones.
+- Display streak information in conversations.
+
+Define a consistent streak rule, such as qualifying reciprocal photo, video, or message activity within a 24-hour window.
+
+Use server-side timestamps to calculate streaks accurately.
+
+Do not allow users to manipulate streak counts through client-side changes.
+
+---
+
+# 11. DISAPPEARING MESSAGES
+
+Allow users to enable disappearing messages.
+
+Suggested options:
+
+- 10 seconds.
+- 1 minute.
+- 1 hour.
+- 24 hours.
+- 7 days.
+- 30 days.
+
+Allow appropriate conversation-level settings.
+
+Use server-side expiration and cleanup processes.
+
+Important: Explain that disappearing messages cannot prevent screenshots, external recordings, or copies made before expiration.
+
+For end-to-end encrypted messages, delete expired message content and encryption material according to the retention policy.
+
+---
+
+# 12. MAGICAL UI/UX DESIGN SYSTEM
+
+This is NEXORA's most important visual identity.
+
+Do not make it look like an ordinary messaging application.
+
+Build an immersive futuristic design language.
+
+### Visual direction
+
+Use:
+
+- Deep cosmic backgrounds.
+- Dark purple and midnight blue.
+- Neon violet accents.
+- Electric blue highlights.
+- Subtle cyan lighting.
+- Glassmorphism.
+- Translucent interface panels.
+- Soft gradients.
+- Glowing borders.
+- Floating visual elements.
+- Smooth transitions.
+- Elegant typography.
+
+Avoid excessive visual clutter.
+
+The interface must remain readable and usable.
+
+### Magical interaction requirements
+
+**Opening a conversation**
+
+When the user clicks a friend's conversation:
+
+- Animate the selected conversation card.
+- Create a smooth expanding transition.
+- Reveal the conversation screen.
+- Use subtle particles and lighting.
+- Maintain a consistent navigation structure.
+
+**Sending messages**
+
+- Animate message bubbles.
+- Use subtle entrance transitions.
+- Display message delivery states.
+- Animate reactions.
+- Make replies visually connected to their original messages.
+
+**Voice messages**
+
+- Animate the recording interface.
+- Display reactive sound waves.
+- Animate playback progress.
+
+**Opening media**
+
+- Use cinematic transitions.
+- Expand photos smoothly.
+- Use immersive video presentation.
+- Keep navigation controls accessible.
+
+**Stories**
+
+- Create animated story rings.
+- Use fluid story transitions.
+- Display beautiful viewing progress.
+
+**Navigation**
+
+- Use smooth page transitions.
+- Animate selected navigation items.
+- Add subtle background motion.
+- Avoid animations that interfere with accessibility or performance.
+
+### Animation technologies
+
+Use suitable technologies such as:
+
+- Framer Motion.
+- Lottie.
+- Rive.
+- CSS animations.
+- Native animation APIs when appropriate.
+
+Do not use animations simply for decoration. Every animation should improve the interaction experience.
+
+Support reduced-motion accessibility preferences.
+
+---
+
+# 13. APPLICATION SCREENS
+
+Build the following screens.
+
+### Authentication
+
+1. Splash screen.
+2. Welcome screen.
+3. Login screen.
+4. Registration screen.
+5. Email OTP verification.
+6. Username selection.
+7. Forgot password.
+8. Password reset.
+
+### Main application
+
+9. Home dashboard.
+10. Private chat list.
+11. One-to-one conversation.
+12. Group conversation.
+13. Create group.
+14. Group information.
+15. User profile.
+16. User search.
+17. Friend requests.
+18. Stories dashboard.
+19. Story viewer.
+20. Media gallery.
+21. Voice message interface.
+22. Notifications.
+23. Settings.
+24. Privacy settings.
+25. Security settings.
+26. Blocked users.
+27. Device/session management.
+
+All screens must have working navigation.
+
+Do not leave dead buttons or nonfunctional interactions.
+
+---
+
+# 14. TECHNICAL ARCHITECTURE
+
+Use a modular, maintainable architecture.
+
+### Recommended technology stack
+
+**Frontend**
+
+- Next.js.
+- React.
+- TypeScript.
+- Tailwind CSS.
+- Framer Motion.
+- Rive or Lottie where appropriate.
+
+**Backend**
+
+- Node.js.
+- NestJS.
+- TypeScript.
+- REST API.
+- WebSockets using Socket.IO.
+
+**Database**
+
+- PostgreSQL.
+- Prisma ORM.
+
+**Caching and background processing**
+
+- Redis.
+- BullMQ.
+
+**Media storage**
+
+- S3-compatible object storage.
+- Encrypted media upload and retrieval.
+
+**Authentication**
+
+- Email OTP.
+- Argon2id password hashing.
+- Secure session management.
+
+**Encryption**
+
+- Audited Signal Protocol implementation for private conversations.
+- An audited group-encryption protocol, such as MLS, where appropriate.
+- Do not invent a cryptographic algorithm.
+
+**Deployment**
+
+- Docker.
+- Docker Compose.
+- Environment-based configuration.
+- Production-ready reverse proxy.
+- CI/CD pipeline.
+
+The architecture should be modular so that a native Android and iOS application can be added later without rebuilding the backend.
+
+---
+
+# 15. END-TO-END ENCRYPTION — CRITICAL
+
+Security is a mandatory core requirement, not an optional feature.
+
+Implement real end-to-end encryption.
+
+### Private conversations
+
+Use an established, audited implementation of the Signal Protocol or an appropriate compatible cryptographic library.
+
+Support:
+
+- Identity keys.
+- Prekeys.
+- Session establishment.
+- Forward secrecy.
+- Post-compromise security where supported.
+- Authenticated message encryption.
+- Device-specific key management.
+- Key rotation.
+- Secure session recovery design.
+
+### Group conversations
+
+Use a suitable audited group encryption protocol, such as Messaging Layer Security (MLS), or another established group encryption design.
+
+Support:
+
+- Secure group key establishment.
+- Membership changes.
+- Key updates.
+- Member removal.
+- Secure group state synchronization.
+- Protection against unauthorized historical access.
+
+### Media encryption
+
+- Encrypt media locally before uploading.
+- Generate secure media encryption keys.
+- Store encrypted media only.
+- Share media keys securely through encrypted conversations.
+- Verify media integrity.
+
+### Server limitations
+
+The server must never have access to plaintext private messages, plaintext encryption keys, or decrypted media.
+
+Only store encrypted message payloads and the metadata strictly necessary for delivery and operation.
+
+Be careful with metadata: end-to-end encryption does not automatically conceal sender identities, timestamps, group membership, IP addresses, or other server-visible information.
+
+### Security verification
+
+Do not claim the application is end-to-end encrypted until encryption is actually implemented and tested.
+
+Provide a documented security architecture, threat model, key lifecycle, and independent security review plan.
+
+Never implement homemade encryption.
+
+---
+
+# 16. DATABASE DESIGN
+
+Design a normalized PostgreSQL database.
+
+Create appropriate models for:
+
+- User
+- UserProfile
+- EmailVerification
+- UserSession
+- Device
+- IdentityKey
+- PreKey
+- PrivateConversation
+- ConversationParticipant
+- Message
+- MessageReceipt
+- MessageReaction
+- MessageAttachment
+- Group
+- GroupMember
+- GroupRole
+- GroupEncryptionState
+- Story
+- StoryView
+- StoryReaction
+- FriendRequest
+- Friendship
+- UserBlock
+- Streak
+- Notification
+- DisappearingMessageSetting
+- UserPrivacySetting
+- Report
+
+### Database requirements
+
+- Use UUID identifiers.
+- Use proper foreign keys.
+- Add database indexes.
+- Enforce username uniqueness.
+- Enforce group member limits transactionally.
+- Add created_at and updated_at timestamps.
+- Handle deleted records safely.
+- Implement appropriate retention policies.
+- Avoid storing plaintext encrypted-message content.
+- Design for pagination and high message volume.
+
+Create and maintain database migration files.
+
+Never modify a production database schema manually without a migration.
+
+---
+
+# 17. PROJECT FILE AND FOLDER MANAGEMENT
+
+Maintain a professional monorepo.
+
+Use the following recommended structure:
+
+```
+NEXORA/
+│
+├── apps/
+│   ├── web/
+│   │   ├── public/
+│   │   │   ├── images/
+│   │   │   ├── icons/
+│   │   │   ├── fonts/
+│   │   │   └── animations/
+│   │   │
+│   │   ├── src/
+│   │   │   ├── app/
+│   │   │   │   ├── (auth)/
+│   │   │   │   ├── (dashboard)/
+│   │   │   │   ├── chats/
+│   │   │   │   ├── groups/
+│   │   │   │   ├── stories/
+│   │   │   │   ├── profile/
+│   │   │   │   └── settings/
+│   │   │   │
+│   │   │   ├── components/
+│   │   │   │   ├── ui/
+│   │   │   │   ├── layout/
+│   │   │   │   ├── chat/
+│   │   │   │   ├── group/
+│   │   │   │   ├── stories/
+│   │   │   │   └── media/
+│   │   │   │
+│   │   │   ├── features/
+│   │   │   ├── hooks/
+│   │   │   ├── services/
+│   │   │   ├── stores/
+│   │   │   ├── lib/
+│   │   │   ├── styles/
+│   │   │   └── types/
+│   │   │
+│   │   └── tests/
+│   │
+│   └── api/
+│       ├── src/
+│       │   ├── modules/
+│       │   │   ├── auth/
+│       │   │   ├── users/
+│       │   │   ├── conversations/
+│       │   │   ├── messages/
+│       │   │   ├── groups/
+│       │   │   ├── stories/
+│       │   │   ├── streaks/
+│       │   │   ├── media/
+│       │   │   ├── notifications/
+│       │   │   └── encryption/
+│       │   │
+│       │   ├── common/
+│       │   ├── config/
+│       │   ├── database/
+│       │   ├── gateways/
+│       │   ├── jobs/
+│       │   └── main.ts
+│       │
+│       └── tests/
+│
+├── packages/
+│   ├── shared/
+│   ├── types/
+│   ├── validation/
+│   ├── crypto/
+│   ├── ui/
+│   └── config/
+│
+├── infrastructure/
+│   ├── docker/
+│   ├── nginx/
+│   ├── scripts/
+│   └── deployment/
+│
+├── database/
+│   ├── migrations/
+│   ├── seeds/
+│   └── schema/
+│
+├── docs/
+│   ├── ARCHITECTURE.md
+│   ├── DATABASE.md
+│   ├── API.md
+│   ├── SECURITY.md
+│   ├── ENCRYPTION.md
+│   ├── DEPLOYMENT.md
+│   └── DEVELOPMENT.md
+│
+├── tests/
+│   ├── integration/
+│   ├── e2e/
+│   ├── security/
+│   └── performance/
+│
+├── .env.example
+├── .gitignore
+├── docker-compose.yml
+├── package.json
+├── pnpm-workspace.yaml
+├── turbo.json
+└── README.md
+```
+
+You may adjust this structure when necessary, but maintain clear separation between frontend, backend, shared packages, infrastructure, and documentation.
+
+---
+
+# 18. STRICT FILE MANAGEMENT RULES
+
+Follow these rules throughout development.
+
+1. Before writing code, inspect the existing project directory.
+2. Never overwrite existing files without inspecting them.
+3. Never delete files unnecessarily.
+4. Never put the entire application into one large file.
+5. Keep components small and reusable.
+6. Separate business logic from UI components.
+7. Separate API logic from database access.
+8. Keep shared TypeScript types in shared packages.
+9. Use clear naming conventions.
+10. Maintain a consistent folder structure.
+11. Create reusable design-system components.
+12. Keep environment secrets outside source code.
+13. Never commit `.env` files.
+14. Provide `.env.example`.
+15. Keep database migrations version-controlled.
+16. Document every important architectural decision.
+17. Avoid duplicate components and duplicate logic.
+18. Remove unused imports and obsolete code.
+19. Run formatting and linting regularly.
+20. Update documentation whenever architecture changes.
+
+After every major implementation stage:
+
+- Check the file structure.
+- Check TypeScript errors.
+- Run linting.
+- Run relevant tests.
+- Fix errors before continuing.
+- Update the project documentation.
+
+Maintain a `PROJECT_STATUS.md` containing:
+
+- Completed features.
+- Features in progress.
+- Known issues.
+- Pending tasks.
+- Database migration status.
+- Security implementation status.
+- Latest test results.
+
+Do not mark a feature complete merely because its screen exists.
+
+---
+
+# 19. API AND REAL-TIME COMMUNICATION
+
+Create well-organized REST APIs.
+
+Suggested API modules:
+
+```
+/api/v1/auth
+/api/v1/users
+/api/v1/friends
+/api/v1/conversations
+/api/v1/messages
+/api/v1/groups
+/api/v1/stories
+/api/v1/streaks
+/api/v1/media
+/api/v1/notifications
+/api/v1/devices
+```
+
+Use WebSockets for:
+
+- Real-time messages.
+- Message delivery acknowledgements.
+- Read receipts.
+- Typing indicators.
+- Online status.
+- Group updates.
+- Notifications.
+
+Implement:
+
+- Authentication for WebSocket connections.
+- Authorization for every conversation.
+- Reconnection handling.
+- Duplicate-message protection.
+- Message ordering.
+- Reliable delivery acknowledgements.
+- Rate limiting.
+- Proper error handling.
+
+Never trust frontend authorization checks.
+
+---
+
+# 20. USER EXPERIENCE AND RESPONSIVENESS
+
+The application must work on:
+
+- Desktop browsers.
+- Tablets.
+- Mobile browsers.
+
+Build a responsive, mobile-first interface.
+
+Support:
+
+- Loading states.
+- Empty states.
+- Error states.
+- Offline states.
+- Upload progress.
+- Retry functionality.
+- Accessible keyboard navigation.
+- Screen-reader labels.
+- Reduced-motion preferences.
+
+Use consistent spacing, typography, colors, and component behavior.
+
+Do not sacrifice usability for visual effects.
+
+---
+
+# 21. PERFORMANCE REQUIREMENTS
+
+Optimize the application for real-world usage.
+
+Implement:
+
+- Message pagination.
+- Lazy loading.
+- Image optimization.
+- Video thumbnail generation.
+- Efficient database queries.
+- Redis caching where appropriate.
+- Background jobs.
+- Media upload streaming.
+- WebSocket connection management.
+- Code splitting.
+- Efficient React rendering.
+
+Do not load the complete conversation history at once.
+
+Make sure the interface remains responsive when there are thousands of messages.
+
+---
+
+# 22. TESTING REQUIREMENTS
+
+Create comprehensive automated tests.
+
+### Authentication tests
+
+- Register a new account.
+- Verify email OTP.
+- Reject expired OTP.
+- Reject incorrect OTP.
+- Prevent duplicate usernames.
+- Login successfully.
+- Reject incorrect passwords.
+- Reset passwords.
+
+### Private messaging tests
+
+- User A sends a message to User B.
+- User B receives the message.
+- Verify delivery status.
+- Verify read receipts.
+- Verify encryption.
+- Verify unauthorized users cannot access the conversation.
+
+### Group tests
+
+- Create a group.
+- Add members.
+- Verify group messaging.
+- Verify member permissions.
+- Verify the 25-member limit.
+- Reject the 26th member.
+- Verify removed members lose access to future group messages.
+
+### Media tests
+
+- Send an encrypted image.
+- Send an encrypted video.
+- Record and send voice messages.
+- Verify unauthorized media access is denied.
+
+### Stories and streaks tests
+
+- Create stories.
+- View stories.
+- Verify expiration.
+- Verify privacy settings.
+- Verify streak calculations.
+
+### Security tests
+
+- Unauthorized API access.
+- Session hijacking protections.
+- Brute-force protection.
+- Access-control bypass.
+- Media authorization.
+- Encryption key exposure.
+- OTP abuse.
+
+Never use fake encryption in security tests.
+
+---
+
+# 23. DEVELOPMENT PHASES
+
+Work in the following order.
+
+## Phase 1 — Project foundation
+
+- Inspect project directory.
+- Initialize monorepo.
+- Configure frontend and backend.
+- Configure TypeScript.
+- Configure PostgreSQL.
+- Configure Prisma.
+- Configure Redis.
+- Set up Docker.
+- Create documentation.
+- Establish the design system.
+
+## Phase 2 — UI/UX implementation
+
+- Create splash screen.
+- Create onboarding.
+- Create registration.
+- Create login.
+- Create OTP verification.
+- Create dashboard.
+- Create chat interface.
+- Create group interface.
+- Create stories interface.
+- Create profile and settings.
+- Implement magical transitions.
+
+## Phase 3 — Authentication backend
+
+- Registration APIs.
+- Email OTP service.
+- Username validation.
+- Login.
+- Password management.
+- Session management.
+- Security controls.
+
+## Phase 4 — Private messaging
+
+- Conversation management.
+- Real-time messaging.
+- Message persistence.
+- Delivery receipts.
+- Read receipts.
+- Typing indicators.
+- Message reactions.
+- Message editing and deletion.
+
+## Phase 5 — Group messaging
+
+- Group creation.
+- Member management.
+- Roles and permissions.
+- Group encryption.
+- Real-time group communication.
+- Enforce 25-member capacity.
+
+## Phase 6 — Media and voice messaging
+
+- Voice recording.
+- Voice playback.
+- Photo upload.
+- Video upload.
+- Encrypted media storage.
+- Media previews.
+
+## Phase 7 — Social features
+
+- Stories.
+- Story viewers.
+- Reactions.
+- Disappearing messages.
+- Friend streaks.
+- Notifications.
+
+## Phase 8 — Security
+
+- Complete end-to-end encryption.
+- Device key management.
+- Secure media encryption.
+- Security testing.
+- Access-control testing.
+- Threat-model review.
+
+## Phase 9 — Quality assurance
+
+- Run automated tests.
+- Fix bugs.
+- Test responsive layouts.
+- Optimize performance.
+- Verify database migrations.
+- Verify real-time functionality.
+- Review security.
+
+## Phase 10 — Deployment
+
+- Prepare production environment.
+- Configure production database.
+- Configure Redis.
+- Configure email provider.
+- Configure encrypted media storage.
+- Configure HTTPS.
+- Configure monitoring.
+- Prepare backup and recovery.
+- Deploy frontend and backend.
+- Document production setup.
+
+---
+
+# 24. IMPORTANT DEVELOPMENT RULES
+
+These rules are non-negotiable.
+
+1. Do not build only a visual prototype.
+2. Do not use fake backend functionality.
+3. Do not use hardcoded sample messages as the actual messaging system.
+4. Do not simulate successful message delivery.
+5. Do not use local state as a replacement for persistent database storage.
+6. Do not use homemade encryption.
+7. Do not expose private encryption keys.
+8. Do not store plaintext passwords.
+9. Do not store private media in publicly accessible storage.
+10. Do not leave important buttons nonfunctional.
+11. Do not create unnecessary features.
+12. Do not introduce calls or video calls.
+13. Do not introduce camera filters.
+14. Do not compromise accessibility for animations.
+15. Do not claim production readiness without tests and security verification.
+
+If a third-party service requires credentials, create its integration correctly, document the required environment variables, and clearly explain what the developer must configure.
+
+If a feature cannot be completed, report it honestly instead of presenting a fake implementation.
+
+---
+
+# 25. FINAL DELIVERY REQUIREMENTS
+
+At the end of development, provide:
+
+1. Complete project source code.
+2. Organized folder structure.
+3. Working frontend.
+4. Working backend.
+5. PostgreSQL database schema.
+6. Database migrations.
+7. Authentication and email verification.
+8. Real-time private messaging.
+9. Group messaging with 25-member maximum.
+10. Voice messaging.
+11. Photo and video sharing.
+12. Stories and streaks.
+13. Disappearing messages.
+14. End-to-end encryption implementation.
+15. Responsive magical UI/UX.
+16. Automated tests.
+17. Docker configuration.
+18. `.env.example`.
+19. Complete README.
+20. Setup and installation instructions.
+21. Deployment instructions.
+22. Security documentation.
+23. Project status report.
+
+The final README must explain how to:
+
+- Install dependencies.
+- Configure environment variables.
+- Start PostgreSQL.
+- Start Redis.
+- Run database migrations.
+- Configure email verification.
+- Start the backend.
+- Start the frontend.
+- Run automated tests.
+- Build for production.
+- Deploy the application.
+
+---
+
+# 26. FINAL INSTRUCTION TO THE CODING AGENT
+
+You are responsible for building NEXORA as a real, complete, maintainable, and secure software product.
+
+Start by inspecting the current workspace.
+
+Then create the architecture and project structure.
+
+Implement features in the specified phases.
+
+Prioritize correctness, security, maintainability, and extraordinary user experience.
+
+Use clean, production-quality TypeScript.
+
+Keep the code modular.
+
+Keep documentation updated.
+
+Test every important feature before declaring it complete.
+
+Do not stop after generating a plan or folder structure. Continue implementing the actual application within the available environment and report any blockers honestly.
+
+**The final goal is to create a beautiful, fully functional, username-based, end-to-end encrypted messaging platform with extraordinary magical interactions that feels completely different from conventional messaging applications.**
+
+# PROJECT NAME: NEXORA
+
+**YOUR IDENTITY. YOUR WORLD. YOUR CONNECTIONS.**
+
+## **How to use this prompt**
+
+I recommend giving the prompt to your coding agent with these additional instructions:
+
+1. Open an empty project workspace or your existing project repository.
+2. Paste the complete master prompt.
+3. Give the agent permission to create and modify project files.
+4. Ask it to complete each development phase and test before proceeding.
+5. Configure real email, database, Redis, and storage credentials when requested.
+
+## **My additional recommendation**
+
+Don't let the coding agent try to build everything in one giant code-generation step. NEXORA has several technically difficult components, especially end-to-end encryption, real-time messaging, and group key management.
+
+Build in phases and verify each feature before moving forward. A visually impressive application with broken messaging or fake encryption is not a successful NEXORA.
+
+**The most important milestone is getting two real users registered, verified through email, and securely exchanging encrypted messages.** Then expand to groups, stories, media, and the magical experience.

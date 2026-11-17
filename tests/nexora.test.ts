@@ -1,0 +1,547 @@
+import test, { describe, before, after } from 'node:test';
+import assert from 'node:assert/strict';
+import http from 'node:http';
+import crypto from 'node:crypto';
+import { createDatabase } from '../server/db.ts';
+import { createApiApp, runRetentionCleanup } from '../server/app.ts';
+import { setupSocketServer } from '../server/socket.ts';
+import { recordStreakActivity } from '../server/streaks.ts';
+
+const subtle = crypto.webcrypto.subtle;
+const enc = new TextEncoder();
+const dec = new TextDecoder();
+
+function bufToB64(buf: ArrayBuffer | Uint8Array): string {
+  return Buffer.from(buf instanceof Uint8Array ? buf : new Uint8Array(buf)).toString('base64');
+}
+
+function b64ToBuf(b64: string): Uint8Array {
+  return new Uint8Array(Buffer.from(b64, 'base64'));
+}
+
+async function generateTestKeyBundle() {
+  const ecdh = await subtle.generateKey({ name: 'ECDH', namedCurve: 'P-256' }, true, ['deriveBits']);
+  const ecdsa = await subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign', 'verify']);
+  const ecdhPublicJwk = JSON.stringify(await subtle.exportKey('jwk', ecdh.publicKey));
+  const ecdsaPublicJwk = JSON.stringify(await subtle.exportKey('jwk', ecdsa.publicKey));
+  return {
+    ecdhPrivateKey: ecdh.privateKey,
+    ecdsaPrivateKey: ecdsa.privateKey,
+    ecdhPublicJwk,
+    ecdsaPublicJwk,
+    fingerprint: '11111 22222 33333 44444 55555',
+  };
+}
+
+async function wrapKeyForRecipient(rawKey: Uint8Array, recipientPublicJwkStr: string, infoText: string) {
+  const epk = await subtle.generateKey({ name: 'ECDH', namedCurve: 'P-256' }, true, ['deriveBits']);
+  const peerPub = await subtle.importKey('jwk', JSON.parse(recipientPublicJwkStr), { name: 'ECDH', namedCurve: 'P-256' }, false, []);
+  const sharedBits = await subtle.deriveBits({ name: 'ECDH', public: peerPub }, epk.privateKey, 256);
+  const hkdfKey = await subtle.importKey('raw', sharedBits, 'HKDF', false, ['deriveKey']);
+  const wrapAes = await subtle.deriveKey(
+    { name: 'HKDF', hash: 'SHA-256', salt: new Uint8Array(32), info: enc.encode(infoText) },
+    hkdfKey,
+    { name: 'AES-GCM', length: 256 },
+    false,
+    ['encrypt']
+  );
+  const iv = crypto.randomBytes(12);
+  const wrapped = await subtle.encrypt({ name: 'AES-GCM', iv }, wrapAes, rawKey);
+  return {
+    ephemeralPublicJwk: JSON.stringify(await subtle.exportKey('jwk', epk.publicKey)),
+    wrappedKey: bufToB64(wrapped),
+    iv: bufToB64(iv),
+  };
+}
+
+async function unwrapKey(
+  envelope: { ephemeralPublicJwk: string; wrappedKey: string; iv: string },
+  myPrivateKey: CryptoKey,
+  infoText: string
+) {
+  const epkPub = await subtle.importKey(
+    'jwk',
+    JSON.parse(envelope.ephemeralPublicJwk),
+    { name: 'ECDH', namedCurve: 'P-256' },
+    false,
+    []
+  );
+  const sharedBits = await subtle.deriveBits({ name: 'ECDH', public: epkPub }, myPrivateKey, 256);
+  const hkdfKey = await subtle.importKey('raw', sharedBits, 'HKDF', false, ['deriveKey']);
+  const wrapAes = await subtle.deriveKey(
+    { name: 'HKDF', hash: 'SHA-256', salt: new Uint8Array(32), info: enc.encode(infoText) },
+    hkdfKey,
+    { name: 'AES-GCM', length: 256 },
+    false,
+    ['decrypt']
+  );
+  const unwrapped = await subtle.decrypt({ name: 'AES-GCM', iv: b64ToBuf(envelope.iv) }, wrapAes, b64ToBuf(envelope.wrappedKey));
+  return new Uint8Array(unwrapped);
+}
+
+describe('NEXORA Full-Stack Integration & Security Suite', () => {
+  let db: ReturnType<typeof createDatabase>;
+  let server: http.Server;
+  let baseUrl: string;
+
+  before(async () => {
+    process.env.NODE_ENV = 'test';
+    db = createDatabase(':memory:');
+    const app = createApiApp(db);
+    server = http.createServer(app);
+    setupSocketServer(server, db);
+    await new Promise<void>((resolve) => {
+      server.listen(0, '127.0.0.1', () => {
+        const addr = server.address() as { port: number };
+        baseUrl = `http://127.0.0.1:${addr.port}`;
+        resolve();
+      });
+    });
+  });
+
+  after(async () => {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    db.close();
+  });
+
+  async function api(path: string, init: RequestInit = {}, token?: string) {
+    const headers: Record<string, string> = {
+      ...(init.headers as Record<string, string>),
+    };
+    if (token) headers['Authorization'] = `Bearer ${token}`;
+    if (typeof init.body === 'string' && !headers['Content-Type']) {
+      headers['Content-Type'] = 'application/json';
+    }
+    const res = await fetch(`${baseUrl}${path}`, { ...init, headers });
+    const data = await res.json().catch(() => ({}));
+    return { status: res.status, data };
+  }
+
+  async function registerUser(email: string, username: string, password = 'StrongPass123') {
+    const otpReq = await api('/api/v1/auth/request-otp', {
+      method: 'POST',
+      body: JSON.stringify({ email, purpose: 'register' }),
+    });
+    assert.equal(otpReq.status, 200);
+    const otpCode = otpReq.data.devOtpPreview;
+    assert.ok(otpCode, 'Dev OTP preview should be issued in test mode');
+
+    const verif = await api('/api/v1/auth/verify-otp', {
+      method: 'POST',
+      body: JSON.stringify({ email, otp: otpCode, purpose: 'register' }),
+    });
+    assert.equal(verif.status, 200);
+
+    const keys = await generateTestKeyBundle();
+    const reg = await api('/api/v1/auth/register', {
+      method: 'POST',
+      body: JSON.stringify({
+        email,
+        verificationToken: verif.data.verificationToken,
+        username,
+        displayName: username,
+        password,
+        keys: {
+          ecdhPublicJwk: keys.ecdhPublicJwk,
+          ecdsaPublicJwk: keys.ecdsaPublicJwk,
+          fingerprint: keys.fingerprint,
+        },
+      }),
+    });
+    assert.equal(reg.status, 201);
+    return { token: reg.data.sessionToken as string, user: reg.data.user, keys };
+  }
+
+  test('Auth: OTP rejection, duplicate username rejection, login, and password reset', async () => {
+    const email = 'alice@nexora.test';
+    const otpReq = await api('/api/v1/auth/request-otp', {
+      method: 'POST',
+      body: JSON.stringify({ email, purpose: 'register' }),
+    });
+    assert.equal(otpReq.status, 200);
+
+    // Reject wrong OTP
+    const badOtp = await api('/api/v1/auth/verify-otp', {
+      method: 'POST',
+      body: JSON.stringify({ email, otp: '999999', purpose: 'register' }),
+    });
+    assert.equal(badOtp.status, 400);
+
+    // Register Alice
+    const verif = await api('/api/v1/auth/verify-otp', {
+      method: 'POST',
+      body: JSON.stringify({ email, otp: otpReq.data.devOtpPreview, purpose: 'register' }),
+    });
+    assert.equal(verif.status, 200);
+    const aliceKeys = await generateTestKeyBundle();
+
+    const reg = await api('/api/v1/auth/register', {
+      method: 'POST',
+      body: JSON.stringify({
+        email,
+        verificationToken: verif.data.verificationToken,
+        username: 'ShadowKing',
+        displayName: 'Shadow King',
+        password: 'Password123',
+        keys: {
+          ecdhPublicJwk: aliceKeys.ecdhPublicJwk,
+          ecdsaPublicJwk: aliceKeys.ecdsaPublicJwk,
+          fingerprint: aliceKeys.fingerprint,
+        },
+      }),
+    });
+    assert.equal(reg.status, 201);
+
+    // Reject duplicate username (case-insensitive)
+    const dupCheck = await api('/api/v1/auth/check-username?username=shadowking');
+    assert.equal(dupCheck.data.available, false);
+
+    // Reject wrong password
+    const badLogin = await api('/api/v1/auth/login', {
+      method: 'POST',
+      body: JSON.stringify({ identifier: 'ShadowKing', password: 'WrongPassword1' }),
+    });
+    assert.equal(badLogin.status, 401);
+
+    // Login succeeds
+    const goodLogin = await api('/api/v1/auth/login', {
+      method: 'POST',
+      body: JSON.stringify({ identifier: '@ShadowKing', password: 'Password123' }),
+    });
+    assert.equal(goodLogin.status, 200);
+    assert.ok(goodLogin.data.sessionToken);
+  });
+
+  test('Private E2EE Messaging: real ciphertext storage, recipient decryption, and 403 isolation', async () => {
+    const alice = await registerUser('e2ee_a@nexora.test', 'MysticSoul');
+    const bob = await registerUser('e2ee_b@nexora.test', 'CyberGhost');
+    const eve = await registerUser('e2ee_c@nexora.test', 'GalaxyQueen');
+
+    // Search by username must never expose email
+    const search = await api('/api/v1/users/search?q=CyberGhost', {}, alice.token);
+    assert.equal(search.status, 200);
+    assert.equal(search.data.users[0].username, 'CyberGhost');
+    assert.equal('email' in search.data.users[0], false);
+
+    // Create private conversation
+    const convRes = await api(
+      '/api/v1/conversations/private',
+      { method: 'POST', body: JSON.stringify({ userId: bob.user.id }) },
+      alice.token
+    );
+    assert.equal(convRes.status, 201);
+    const convId = convRes.data.conversationId as string;
+
+    // Alice encrypts message client-side
+    const secretText = 'Top secret NEXORA coordinates: 42.3601 N';
+    const msgId = crypto.randomUUID();
+    const aad = `${convId}:${alice.user.id}:${msgId}`;
+    const msgKey = crypto.randomBytes(32);
+    const iv = crypto.randomBytes(12);
+    const aesKey = await subtle.importKey('raw', msgKey, { name: 'AES-GCM' }, false, ['encrypt']);
+    const ciphertextBuf = await subtle.encrypt(
+      { name: 'AES-GCM', iv, additionalData: enc.encode(aad) },
+      aesKey,
+      enc.encode(JSON.stringify({ text: secretText }))
+    );
+
+    const envAlice = await wrapKeyForRecipient(msgKey, alice.keys.ecdhPublicJwk, 'nexora-e2ee-key-wrap-v1');
+    const envBob = await wrapKeyForRecipient(msgKey, bob.keys.ecdhPublicJwk, 'nexora-e2ee-key-wrap-v1');
+
+    const sendRes = await api(
+      `/api/v1/conversations/${convId}/messages`,
+      {
+        method: 'POST',
+        body: JSON.stringify({
+          id: msgId,
+          kind: 'text',
+          ciphertext: bufToB64(ciphertextBuf),
+          iv: bufToB64(iv),
+          aad,
+          recipientEnvelopes: {
+            [alice.user.id]: envAlice,
+            [bob.user.id]: envBob,
+          },
+        }),
+      },
+      alice.token
+    );
+    assert.equal(sendRes.status, 201);
+
+    // Verify database does NOT contain plaintext
+    const dbMsg = db.prepare(`SELECT ciphertext FROM messages WHERE id = ?`).get(msgId) as { ciphertext: string };
+    assert.equal(dbMsg.ciphertext.includes('Top secret'), false);
+
+    // Bob fetches & decrypts
+    const bobMsgs = await api(`/api/v1/conversations/${convId}/messages`, {}, bob.token);
+    assert.equal(bobMsgs.status, 200);
+    const fetched = bobMsgs.data.messages[0];
+    const unwrappedKey = await unwrapKey(
+      fetched.recipientEnvelopes[bob.user.id],
+      bob.keys.ecdhPrivateKey,
+      'nexora-e2ee-key-wrap-v1'
+    );
+    const bobAes = await subtle.importKey('raw', unwrappedKey, { name: 'AES-GCM' }, false, ['decrypt']);
+    const decryptedBuf = await subtle.decrypt(
+      { name: 'AES-GCM', iv: b64ToBuf(fetched.iv), additionalData: enc.encode(fetched.aad) },
+      bobAes,
+      b64ToBuf(fetched.ciphertext)
+    );
+    const decoded = JSON.parse(dec.decode(decryptedBuf));
+    assert.equal(decoded.text, secretText);
+
+    // Bob sends a cryptographically signed & encrypted read receipt
+    const viewedAt = new Date().toISOString();
+    const canonicalReceipt = `nexora:read-receipt:v1:${convId}:${msgId}:${bob.user.id}:${viewedAt}`;
+    const sigBuf = await subtle.sign(
+      { name: 'ECDSA', hash: 'SHA-256' },
+      bob.keys.ecdsaPrivateKey,
+      enc.encode(canonicalReceipt)
+    );
+    const receiptKey = crypto.randomBytes(32);
+    const receiptIv = crypto.randomBytes(12);
+    const receiptAad = `nexora-receipt:${convId}:${msgId}:${bob.user.id}`;
+    const receiptAes = await subtle.importKey('raw', receiptKey, { name: 'AES-GCM' }, false, ['encrypt']);
+    const receiptCipher = await subtle.encrypt(
+      { name: 'AES-GCM', iv: receiptIv, additionalData: enc.encode(receiptAad) },
+      receiptAes,
+      enc.encode(
+        JSON.stringify({
+          type: 'read_receipt',
+          conversationId: convId,
+          messageId: msgId,
+          readerId: bob.user.id,
+          viewedAt,
+          signature: bufToB64(sigBuf),
+        })
+      )
+    );
+    const receiptEnvAlice = await wrapKeyForRecipient(receiptKey, alice.keys.ecdhPublicJwk, 'nexora-e2ee-read-receipt-v1');
+
+    // Forged signature must be rejected by server
+    const forgedRes = await api(
+      `/api/v1/conversations/${convId}/read`,
+      {
+        method: 'POST',
+        body: JSON.stringify({
+          receipts: [
+            {
+              messageId: msgId,
+              readerId: bob.user.id,
+              viewedAt,
+              signature: bufToB64(crypto.randomBytes(64)),
+            },
+          ],
+        }),
+      },
+      bob.token
+    );
+    assert.equal(forgedRes.status, 400);
+    assert.equal(forgedRes.data.code, 'INVALID_RECEIPT_SIGNATURE');
+
+    // Valid signed & encrypted read receipt succeeds
+    const validReadRes = await api(
+      `/api/v1/conversations/${convId}/read`,
+      {
+        method: 'POST',
+        body: JSON.stringify({
+          receipts: [
+            {
+              messageId: msgId,
+              readerId: bob.user.id,
+              viewedAt,
+              signature: bufToB64(sigBuf),
+              ciphertext: bufToB64(receiptCipher),
+              iv: bufToB64(receiptIv),
+              aad: receiptAad,
+              recipientEnvelopes: { [alice.user.id]: receiptEnvAlice },
+            },
+          ],
+        }),
+      },
+      bob.token
+    );
+    assert.equal(validReadRes.status, 200);
+
+    // Alice fetches message, decrypts & verifies Bob's ECDSA read receipt
+    const aliceMsgs = await api(`/api/v1/conversations/${convId}/messages`, {}, alice.token);
+    assert.equal(aliceMsgs.status, 200);
+    const aliceFetched = aliceMsgs.data.messages[0];
+    assert.equal(aliceFetched.status, 'read');
+    assert.equal(aliceFetched.readReceipts.length, 1);
+    const rr = aliceFetched.readReceipts[0];
+    const unwrappedReceiptKey = await unwrapKey(
+      rr.recipientEnvelopes[alice.user.id],
+      alice.keys.ecdhPrivateKey,
+      'nexora-e2ee-read-receipt-v1'
+    );
+    const aliceReceiptAes = await subtle.importKey('raw', unwrappedReceiptKey, { name: 'AES-GCM' }, false, ['decrypt']);
+    const receiptPlain = await subtle.decrypt(
+      { name: 'AES-GCM', iv: b64ToBuf(rr.iv), additionalData: enc.encode(rr.aad) },
+      aliceReceiptAes,
+      b64ToBuf(rr.ciphertext)
+    );
+    const receiptDecoded = JSON.parse(dec.decode(receiptPlain));
+    const bobVerifyKey = await subtle.importKey(
+      'jwk',
+      JSON.parse(bob.keys.ecdsaPublicJwk),
+      { name: 'ECDSA', namedCurve: 'P-256' },
+      false,
+      ['verify']
+    );
+    const sigValid = await subtle.verify(
+      { name: 'ECDSA', hash: 'SHA-256' },
+      bobVerifyKey,
+      b64ToBuf(receiptDecoded.signature),
+      enc.encode(`nexora:read-receipt:v1:${convId}:${msgId}:${bob.user.id}:${receiptDecoded.viewedAt}`)
+    );
+    assert.equal(sigValid, true);
+
+    // Eve (unauthorized) cannot read conversation
+    const eveAccess = await api(`/api/v1/conversations/${convId}/messages`, {}, eve.token);
+    assert.equal(eveAccess.status, 403);
+  });
+
+  test('Groups: 25-member transactional cap & Epoch rotation on removal', async () => {
+    const owner = await registerUser('grp_owner@nexora.test', 'GroupOwner1');
+    const members = [];
+    for (let i = 1; i <= 25; i++) {
+      members.push(await registerUser(`grp_m${i}@nexora.test`, `Member_${i}`));
+    }
+
+    // Create group with owner + 23 members = 24
+    const initial23 = members.slice(0, 23);
+    const grpRes = await api(
+      '/api/v1/groups',
+      {
+        method: 'POST',
+        body: JSON.stringify({
+          name: 'Cosmic Council',
+          memberIds: initial23.map((m) => m.user.id),
+          epochEnvelopes: [],
+        }),
+      },
+      owner.token
+    );
+    assert.equal(grpRes.status, 201);
+    assert.equal(grpRes.data.memberCount, 24);
+    const groupId = grpRes.data.groupId as string;
+
+    // Adding 25th member succeeds
+    const add25 = await api(
+      `/api/v1/groups/${groupId}/members`,
+      {
+        method: 'POST',
+        body: JSON.stringify({ userId: members[23].user.id, epochEnvelopes: [] }),
+      },
+      owner.token
+    );
+    assert.equal(add25.status, 201);
+    assert.equal(add25.data.currentEpoch, 2);
+
+    // Adding 26th member MUST fail with 400 GROUP_CAPACITY_EXCEEDED
+    const add26 = await api(
+      `/api/v1/groups/${groupId}/members`,
+      {
+        method: 'POST',
+        body: JSON.stringify({ userId: members[24].user.id, epochEnvelopes: [] }),
+      },
+      owner.token
+    );
+    assert.equal(add26.status, 400);
+    assert.equal(add26.data.code, 'GROUP_CAPACITY_EXCEEDED');
+
+    // Remove a member and confirm epoch advances & removed user loses access
+    const removeRes = await api(
+      `/api/v1/groups/${groupId}/members/${members[0].user.id}`,
+      { method: 'DELETE', body: JSON.stringify({ epochEnvelopes: [] }) },
+      owner.token
+    );
+    assert.equal(removeRes.status, 200);
+    assert.equal(removeRes.data.currentEpoch, 3);
+
+    const removedAccess = await api(`/api/v1/groups/${groupId}`, {}, members[0].token);
+    assert.equal(removedAccess.status, 403);
+  });
+
+  test('Media Authorization, 24h Stories Expiration & Server-Side Streaks', async () => {
+    const u1 = await registerUser('media_u1@nexora.test', 'MoonLight');
+    const u2 = await registerUser('media_u2@nexora.test', 'StarGazer');
+    const stranger = await registerUser('media_u3@nexora.test', 'Intruder99');
+
+    // Connect u1 & u2 as friends
+    const reqRes = await api(
+      '/api/v1/friends/requests',
+      { method: 'POST', body: JSON.stringify({ userId: u2.user.id }) },
+      u1.token
+    );
+    assert.equal(reqRes.status, 201);
+    const accRes = await api(
+      `/api/v1/friends/requests/${reqRes.data.id}/respond`,
+      { method: 'POST', body: JSON.stringify({ action: 'accept' }) },
+      u2.token
+    );
+    assert.equal(accRes.status, 200);
+
+    // Encrypted story upload
+    const fakeCipherBytes = crypto.randomBytes(64);
+    const upRes = await fetch(`${baseUrl}/api/v1/media/upload`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${u1.token}`,
+        'Content-Type': 'application/octet-stream',
+        'x-nexora-story': '1',
+        'x-nexora-mime-type': 'image/webp',
+        'x-nexora-original-size': '64',
+      },
+      body: fakeCipherBytes,
+    });
+    assert.equal(upRes.status, 201);
+    const { attachmentId } = (await upRes.json()) as { attachmentId: string };
+
+    const storyRes = await api(
+      '/api/v1/stories',
+      {
+        method: 'POST',
+        body: JSON.stringify({
+          mediaType: 'image',
+          attachmentId,
+          ciphertextMeta: 'encmeta',
+          iv: 'enciv',
+          recipientEnvelopes: {
+            [u1.user.id]: { ephemeralPublicJwk: '{}', wrappedKey: 'a', iv: 'b' },
+            [u2.user.id]: { ephemeralPublicJwk: '{}', wrappedKey: 'c', iv: 'd' },
+          },
+          visibility: 'friends',
+        }),
+      },
+      u1.token
+    );
+    assert.equal(storyRes.status, 201);
+
+    // Friend u2 CAN access encrypted story media; stranger gets 403
+    const friendMedia = await fetch(`${baseUrl}/api/v1/media/${attachmentId}`, {
+      headers: { Authorization: `Bearer ${u2.token}` },
+    });
+    assert.equal(friendMedia.status, 200);
+
+    const strangerMedia = await fetch(`${baseUrl}/api/v1/media/${attachmentId}`, {
+      headers: { Authorization: `Bearer ${stranger.token}` },
+    });
+    assert.equal(strangerMedia.status, 403);
+
+    // Expire story & run retention cleanup
+    db.prepare(`UPDATE stories SET expires_at = '2020-01-01T00:00:00.000Z' WHERE id = ?`).run(storyRes.data.id);
+    runRetentionCleanup(db);
+    const storiesAfter = await api('/api/v1/stories', {}, u2.token);
+    assert.equal(storiesAfter.data.stories.length, 0);
+
+    // Server-side reciprocal Streak calculation
+    const t0 = Date.now();
+    const s1 = recordStreakActivity(db, u1.user.id, u2.user.id, t0);
+    assert.equal(s1.streakCount, 0);
+    const s2 = recordStreakActivity(db, u2.user.id, u1.user.id, t0 + 60_000);
+    assert.equal(s2.streakCount, 1);
+    assert.equal(s2.isActive, true);
+  });
+});

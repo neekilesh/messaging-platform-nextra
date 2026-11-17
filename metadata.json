@@ -1,0 +1,6 @@
+{
+  "name": "NEXORA",
+  "description": "Username-based, end-to-end encrypted messaging platform with real-time private chats, 25-member encrypted groups, voice messaging, 24-hour stories, and friend streaks.",
+  "requestFramePermissions": ["microphone"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
