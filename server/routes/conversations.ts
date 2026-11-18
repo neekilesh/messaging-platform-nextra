@@ -1,6 +1,22 @@
 import crypto from 'node:crypto';
 import { Router } from 'express';
-import type { DatabaseSync } from 'node:sqlite';
+import { and, asc, count, desc, eq, gt, isNull, lt, ne, or, sql } from 'drizzle-orm';
+import type { PgDatabase } from '../../src/db/index.ts';
+import {
+  conversationParticipants,
+  conversations,
+  friendships,
+  groupEncryptionStates,
+  groupMembers,
+  groups,
+  identityKeys,
+  messageAttachments,
+  messageReactions,
+  messageReceipts,
+  messages,
+  privacySettings,
+  users,
+} from '../../src/db/schema.ts';
 import { createRequireAuth, getIO, getPublicUserById, isBlockedBetween } from '../context.ts';
 import type { AuthedRequest } from '../context.ts';
 import { getStreakInfo, recordStreakActivity } from '../streaks.ts';
@@ -48,49 +64,36 @@ function orderPair(a: string, b: string): [string, string] {
 
 const ALLOWED_DISAPPEARING = new Set([0, 10, 60, 3600, 86400, 604800, 2592000]);
 
-export function hydrateMessageRow(
-  db: DatabaseSync,
-  row: {
-    id: string;
-    conversation_id: string;
-    sender_id: string;
-    reply_to_id: string | null;
-    forwarded_from_id: string | null;
-    kind: string;
-    ciphertext: string;
-    iv: string;
-    aad: string;
-    recipient_envelopes_json: string | null;
-    epoch: number | null;
-    attachment_id: string | null;
-    is_pinned: number;
-    is_edited: number;
-    deleted_for_everyone: number;
-    expires_at: string | null;
-    created_at: string;
-    updated_at: string;
-  },
-  requesterId: string
-): MessageRecord {
-  const sender = db
-    .prepare(`SELECT username, display_name, avatar_url FROM users WHERE id = ?`)
-    .get(row.sender_id) as { username: string; display_name: string; avatar_url: string | null } | undefined;
+type MessageDbRow = typeof messages.$inferSelect;
 
-  // Compute aggregate status for sender
+export async function hydrateMessageRow(
+  database: PgDatabase,
+  row: MessageDbRow,
+  requesterId: string
+): Promise<MessageRecord> {
+  const senderRows = await database
+    .select({
+      username: users.username,
+      displayName: users.displayName,
+      avatarUrl: users.avatarUrl,
+    })
+    .from(users)
+    .where(eq(users.id, row.senderId))
+    .limit(1);
+  const sender = senderRows[0];
+
   let status: MessageStatus = 'sent';
-  const receipts = db
-    .prepare(
-      `SELECT user_id, status, signature, signed_at, encrypted_payload_json, updated_at
-       FROM message_receipts WHERE message_id = ? AND user_id != ?`
-    )
-    .all(row.id, row.sender_id) as Array<{
-    user_id: string;
-    status: string;
-    signature: string | null;
-    signed_at: string | null;
-    encrypted_payload_json: string | null;
-    updated_at: string;
-  }>;
+  const receipts = await database
+    .select({
+      userId: messageReceipts.userId,
+      status: messageReceipts.status,
+      signature: messageReceipts.signature,
+      signedAt: messageReceipts.signedAt,
+      encryptedPayloadJson: messageReceipts.encryptedPayloadJson,
+      updatedAt: messageReceipts.updatedAt,
+    })
+    .from(messageReceipts)
+    .where(and(eq(messageReceipts.messageId, row.id), ne(messageReceipts.userId, row.senderId)));
 
   if (receipts.some((r) => r.status === 'read')) {
     status = 'read';
@@ -108,9 +111,9 @@ export function hydrateMessageRow(
         recipientEnvelopes?: Record<string, RecipientEnvelope> | null;
         epoch?: number | null;
       } = {};
-      if (r.encrypted_payload_json) {
+      if (r.encryptedPayloadJson) {
         try {
-          encPayload = JSON.parse(r.encrypted_payload_json);
+          encPayload = JSON.parse(r.encryptedPayloadJson);
         } catch {
           encPayload = {};
         }
@@ -122,8 +125,8 @@ export function hydrateMessageRow(
 
       return {
         messageId: row.id,
-        readerId: r.user_id,
-        viewedAt: r.signed_at || r.updated_at,
+        readerId: r.userId,
+        viewedAt: r.signedAt || r.updatedAt,
         signature: r.signature!,
         ciphertext: encPayload.ciphertext || null,
         iv: encPayload.iv || null,
@@ -133,26 +136,35 @@ export function hydrateMessageRow(
       };
     });
 
-  const reactionRows = db
-    .prepare(`SELECT emoji, user_id FROM message_reactions WHERE message_id = ?`)
-    .all(row.id) as Array<{ emoji: string; user_id: string }>;
+  const reactionRows = await database
+    .select({
+      emoji: messageReactions.emoji,
+      userId: messageReactions.userId,
+    })
+    .from(messageReactions)
+    .where(eq(messageReactions.messageId, row.id));
 
   const reactionMap = new Map<string, string[]>();
   for (const r of reactionRows) {
     const list = reactionMap.get(r.emoji) || [];
-    list.push(r.user_id);
+    list.push(r.userId);
     reactionMap.set(r.emoji, list);
   }
-  const reactions: MessageReactionItem[] = Array.from(reactionMap.entries()).map(([emoji, userIds]) => ({
-    emoji,
-    userIds,
-    count: userIds.length,
-  }));
+  const reactions: MessageReactionItem[] = Array.from(reactionMap.entries()).map(
+    ([emoji, userIds]) => ({
+      emoji,
+      userIds,
+      count: userIds.length,
+    })
+  );
 
-  let parsedEnvelopes: Record<string, { ephemeralPublicJwk: string; wrappedKey: string; iv: string }> | null = null;
-  if (row.recipient_envelopes_json) {
+  let parsedEnvelopes: Record<
+    string,
+    { ephemeralPublicJwk: string; wrappedKey: string; iv: string }
+  > | null = null;
+  if (row.recipientEnvelopesJson) {
     try {
-      const full = JSON.parse(row.recipient_envelopes_json) as Record<
+      const full = JSON.parse(row.recipientEnvelopesJson) as Record<
         string,
         { ephemeralPublicJwk: string; wrappedKey: string; iv: string }
       >;
@@ -168,752 +180,983 @@ export function hydrateMessageRow(
 
   return {
     id: row.id,
-    conversationId: row.conversation_id,
-    senderId: row.sender_id,
+    conversationId: row.conversationId,
+    senderId: row.senderId,
     senderUsername: sender?.username || 'unknown',
-    senderDisplayName: sender?.display_name || 'Unknown',
-    senderAvatarUrl: sender?.avatar_url || null,
-    replyToId: row.reply_to_id,
-    forwardedFromId: row.forwarded_from_id,
+    senderDisplayName: sender?.displayName || 'Unknown',
+    senderAvatarUrl: sender?.avatarUrl || null,
+    replyToId: row.replyToId,
+    forwardedFromId: row.forwardedFromId,
     kind: row.kind as MessageRecord['kind'],
-    ciphertext: row.deleted_for_everyone ? '' : row.ciphertext,
-    iv: row.deleted_for_everyone ? '' : row.iv,
+    ciphertext: row.deletedForEveryone ? '' : row.ciphertext,
+    iv: row.deletedForEveryone ? '' : row.iv,
     aad: row.aad,
-    recipientEnvelopes: row.deleted_for_everyone ? null : parsedEnvelopes,
+    recipientEnvelopes: row.deletedForEveryone ? null : parsedEnvelopes,
     epoch: row.epoch,
-    attachmentId: row.deleted_for_everyone ? null : row.attachment_id,
-    isPinned: row.is_pinned === 1,
-    isEdited: row.is_edited === 1,
-    deletedForEveryone: row.deleted_for_everyone === 1,
-    expiresAt: row.expires_at,
-    createdAt: row.created_at,
-    updatedAt: row.updated_at,
+    attachmentId: row.deletedForEveryone ? null : row.attachmentId,
+    isPinned: row.isPinned === 1,
+    isEdited: row.isEdited === 1,
+    deletedForEveryone: row.deletedForEveryone === 1,
+    expiresAt: row.expiresAt,
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
     status,
     reactions,
     ...(readReceipts.length > 0 ? { readReceipts } : {}),
   };
 }
 
-export function createConversationsRouter(db: DatabaseSync) {
+export function createConversationsRouter(database: PgDatabase) {
   const router = Router();
-  const requireAuth = createRequireAuth(db);
+  const requireAuth = createRequireAuth(database);
 
-  router.get('/', requireAuth, (req: AuthedRequest, res) => {
-    const nowIso = new Date().toISOString();
-    const rows = db
-      .prepare(
-        `SELECT c.id, c.type, c.group_id, c.disappearing_seconds, c.last_message_at,
-                cp.muted, cp.archived, cp.unread_count,
-                g.name as group_name, g.description as group_desc, g.avatar_url as group_avatar,
-                g.max_members, g.current_epoch
-         FROM conversation_participants cp
-         JOIN conversations c ON c.id = cp.conversation_id
-         LEFT JOIN groups g ON g.id = c.group_id
-         WHERE cp.user_id = ?
-         ORDER BY COALESCE(c.last_message_at, c.created_at) DESC`
-      )
-      .all(req.userId!) as Array<{
-      id: string;
-      type: 'private' | 'group';
-      group_id: string | null;
-      disappearing_seconds: number;
-      last_message_at: string | null;
-      muted: number;
-      archived: number;
-      unread_count: number;
-      group_name: string | null;
-      group_desc: string | null;
-      group_avatar: string | null;
-      max_members: number | null;
-      current_epoch: number | null;
-    }>;
+  router.get('/', requireAuth, async (req: AuthedRequest, res) => {
+    try {
+      const nowIso = new Date().toISOString();
+      const rows = await database
+        .select({
+          id: conversations.id,
+          type: conversations.type,
+          groupId: conversations.groupId,
+          disappearingSeconds: conversations.disappearingSeconds,
+          lastMessageAt: conversations.lastMessageAt,
+          muted: conversationParticipants.muted,
+          archived: conversationParticipants.archived,
+          unreadCount: conversationParticipants.unreadCount,
+          groupName: groups.name,
+          groupDesc: groups.description,
+          groupAvatar: groups.avatarUrl,
+          maxMembers: groups.maxMembers,
+          currentEpoch: groups.currentEpoch,
+        })
+        .from(conversationParticipants)
+        .innerJoin(conversations, eq(conversations.id, conversationParticipants.conversationId))
+        .leftJoin(groups, eq(groups.id, conversations.groupId))
+        .where(eq(conversationParticipants.userId, req.userId!))
+        .orderBy(desc(sql`COALESCE(${conversations.lastMessageAt}, ${conversations.createdAt})`));
 
-    const conversations = rows
-      .map((row) => {
-        let title = row.group_name || 'Conversation';
+      const result = [];
+      for (const row of rows) {
+        let title = row.groupName || 'Conversation';
         let subtitle = '';
-        let avatarUrl = row.group_avatar || null;
+        let avatarUrl = row.groupAvatar || null;
         let peerUser = null;
         let streak = null;
         let groupMemberCount: number | null = null;
         let myEpochEnvelopes = undefined;
 
         if (row.type === 'private') {
-          const other = db
-            .prepare(
-              `SELECT user_id FROM conversation_participants WHERE conversation_id = ? AND user_id != ? LIMIT 1`
+          const otherRows = await database
+            .select({ userId: conversationParticipants.userId })
+            .from(conversationParticipants)
+            .where(
+              and(
+                eq(conversationParticipants.conversationId, row.id),
+                ne(conversationParticipants.userId, req.userId!)
+              )
             )
-            .get(row.id, req.userId!) as { user_id: string } | undefined;
-          if (!other) return null;
-          if (isBlockedBetween(db, req.userId!, other.user_id)) return null;
-          peerUser = getPublicUserById(db, other.user_id, req.userId!);
-          if (!peerUser) return null;
+            .limit(1);
+          const other = otherRows[0];
+          if (!other) continue;
+          if (await isBlockedBetween(database, req.userId!, other.userId)) continue;
+          peerUser = await getPublicUserById(database, other.userId, req.userId!);
+          if (!peerUser) continue;
           title = peerUser.displayName;
           subtitle = `@${peerUser.username}`;
           avatarUrl = peerUser.avatarUrl;
-          streak = getStreakInfo(db, req.userId!, other.user_id);
-        } else if (row.group_id) {
-          const countRow = db
-            .prepare(`SELECT COUNT(*) as cnt FROM group_members WHERE group_id = ?`)
-            .get(row.group_id) as { cnt: number };
-          groupMemberCount = countRow.cnt;
-          subtitle = `${groupMemberCount}/${row.max_members || 25} members`;
+          streak = await getStreakInfo(database, req.userId!, other.userId);
+        } else if (row.groupId) {
+          const countRows = await database
+            .select({ cnt: count() })
+            .from(groupMembers)
+            .where(eq(groupMembers.groupId, row.groupId));
+          groupMemberCount = Number(countRows[0]?.cnt || 0);
+          subtitle = `${groupMemberCount}/${row.maxMembers || 25} members`;
 
-          const envRows = db
-            .prepare(
-              `SELECT epoch, sender_user_id, ephemeral_public_jwk, wrapped_epoch_key, iv
-               FROM group_encryption_states
-               WHERE group_id = ? AND user_id = ?
-               ORDER BY epoch ASC`
+          const envRows = await database
+            .select({
+              epoch: groupEncryptionStates.epoch,
+              senderUserId: groupEncryptionStates.senderUserId,
+              ephemeralPublicJwk: groupEncryptionStates.ephemeralPublicJwk,
+              wrappedEpochKey: groupEncryptionStates.wrappedEpochKey,
+              iv: groupEncryptionStates.iv,
+            })
+            .from(groupEncryptionStates)
+            .where(
+              and(
+                eq(groupEncryptionStates.groupId, row.groupId),
+                eq(groupEncryptionStates.userId, req.userId!)
+              )
             )
-            .all(row.group_id, req.userId!) as Array<{
-            epoch: number;
-            sender_user_id: string;
-            ephemeral_public_jwk: string;
-            wrapped_epoch_key: string;
-            iv: string;
-          }>;
-          myEpochEnvelopes = envRows.map((e) => ({
-            epoch: e.epoch,
-            senderUserId: e.sender_user_id,
-            ephemeralPublicJwk: e.ephemeral_public_jwk,
-            wrappedEpochKey: e.wrapped_epoch_key,
-            iv: e.iv,
-          }));
+            .orderBy(asc(groupEncryptionStates.epoch));
+          myEpochEnvelopes = envRows;
         }
 
-        const lastMsgRow = db
-          .prepare(
-            `SELECT * FROM messages
-             WHERE conversation_id = ?
-               AND (expires_at IS NULL OR expires_at > ?)
-             ORDER BY created_at DESC LIMIT 1`
+        const lastMsgRows = await database
+          .select()
+          .from(messages)
+          .where(
+            and(
+              eq(messages.conversationId, row.id),
+              or(isNull(messages.expiresAt), gt(messages.expiresAt, nowIso))
+            )
           )
-          .get(row.id, nowIso) as Parameters<typeof hydrateMessageRow>[1] | undefined;
+          .orderBy(desc(messages.createdAt))
+          .limit(1);
 
-        const lastMessage = lastMsgRow ? hydrateMessageRow(db, lastMsgRow, req.userId!) : null;
+        const lastMessage = lastMsgRows[0]
+          ? await hydrateMessageRow(database, lastMsgRows[0], req.userId!)
+          : null;
 
-        return {
+        result.push({
           id: row.id,
-          type: row.type,
+          type: row.type as 'private' | 'group',
           title,
           subtitle,
           avatarUrl,
           peerUser,
-          groupId: row.group_id,
+          groupId: row.groupId,
           groupMemberCount,
-          groupMaxMembers: row.max_members,
-          currentEpoch: row.current_epoch,
-          disappearingSeconds: row.disappearing_seconds,
+          groupMaxMembers: row.maxMembers,
+          currentEpoch: row.currentEpoch,
+          disappearingSeconds: row.disappearingSeconds,
           muted: row.muted === 1,
           archived: row.archived === 1,
-          unreadCount: row.unread_count,
+          unreadCount: row.unreadCount,
           streak,
           lastMessage,
-          lastMessageAt: row.last_message_at,
+          lastMessageAt: row.lastMessageAt,
           ...(myEpochEnvelopes ? { myEpochEnvelopes } : {}),
-        };
-      })
-      .filter(Boolean);
-
-    return res.json({ conversations });
-  });
-
-  router.post('/private', requireAuth, (req: AuthedRequest, res) => {
-    const peerId = typeof req.body?.userId === 'string' ? req.body.userId : '';
-    if (!peerId || peerId === req.userId) {
-      return res.status(400).json({ error: 'Valid recipient userId is required.' });
-    }
-
-    const peerExists = db.prepare(`SELECT id FROM users WHERE id = ?`).get(peerId);
-    if (!peerExists) {
-      return res.status(404).json({ error: 'User not found.' });
-    }
-
-    if (isBlockedBetween(db, req.userId!, peerId)) {
-      return res.status(403).json({ error: 'Messaging is unavailable with this user.' });
-    }
-
-    const [a, b] = orderPair(req.userId!, peerId);
-    const pairKey = `${a}:${b}`;
-
-    const existing = db
-      .prepare(`SELECT id FROM conversations WHERE private_pair_key = ?`)
-      .get(pairKey) as { id: string } | undefined;
-
-    if (existing) {
-      return res.json({ conversationId: existing.id, created: false });
-    }
-
-    // Check friendship OR allow_chat_requests
-    const isFriend = db
-      .prepare(`SELECT 1 FROM friendships WHERE user_a_id = ? AND user_b_id = ?`)
-      .get(a, b);
-    if (!isFriend) {
-      const privacy = db
-        .prepare(`SELECT allow_chat_requests FROM privacy_settings WHERE user_id = ?`)
-        .get(peerId) as { allow_chat_requests: number } | undefined;
-      if (privacy && privacy.allow_chat_requests === 0) {
-        return res.status(403).json({ error: 'Connect as friends first to message this user.' });
-      }
-    }
-
-    const convId = crypto.randomUUID();
-    const nowIso = new Date().toISOString();
-
-    db.exec('BEGIN IMMEDIATE');
-    try {
-      db.prepare(
-        `INSERT INTO conversations (id, type, group_id, private_pair_key, disappearing_seconds, last_message_at, created_at, updated_at)
-         VALUES (?, 'private', NULL, ?, 0, NULL, ?, ?)`
-      ).run(convId, pairKey, nowIso, nowIso);
-
-      db.prepare(
-        `INSERT INTO conversation_participants (id, conversation_id, user_id, joined_at) VALUES (?, ?, ?, ?)`
-      ).run(crypto.randomUUID(), convId, req.userId!, nowIso);
-
-      db.prepare(
-        `INSERT INTO conversation_participants (id, conversation_id, user_id, joined_at) VALUES (?, ?, ?, ?)`
-      ).run(crypto.randomUUID(), convId, peerId, nowIso);
-
-      db.exec('COMMIT');
-    } catch (err) {
-      db.exec('ROLLBACK');
-      throw err;
-    }
-
-    const io = getIO();
-    if (io) {
-      io.in(`user:${req.userId!}`).socketsJoin(`conv:${convId}`);
-      io.in(`user:${peerId}`).socketsJoin(`conv:${convId}`);
-      io.to(`user:${peerId}`).emit('conversation:new', { conversationId: convId });
-    }
-
-    return res.status(201).json({ conversationId: convId, created: true });
-  });
-
-  router.patch('/:id/settings', requireAuth, (req: AuthedRequest, res) => {
-    const convId = req.params.id;
-    const participant = db
-      .prepare(`SELECT * FROM conversation_participants WHERE conversation_id = ? AND user_id = ?`)
-      .get(convId, req.userId!);
-    if (!participant) {
-      return res.status(403).json({ error: 'Not a participant in this conversation.' });
-    }
-
-    const body = req.body || {};
-    const nowIso = new Date().toISOString();
-
-    if (typeof body.muted === 'boolean') {
-      db.prepare(`UPDATE conversation_participants SET muted = ? WHERE conversation_id = ? AND user_id = ?`).run(
-        body.muted ? 1 : 0,
-        convId,
-        req.userId!
-      );
-    }
-
-    if (typeof body.archived === 'boolean') {
-      db.prepare(`UPDATE conversation_participants SET archived = ? WHERE conversation_id = ? AND user_id = ?`).run(
-        body.archived ? 1 : 0,
-        convId,
-        req.userId!
-      );
-    }
-
-    if (typeof body.disappearingSeconds === 'number') {
-      if (!ALLOWED_DISAPPEARING.has(body.disappearingSeconds)) {
-        return res.status(400).json({ error: 'Unsupported disappearing message interval.' });
-      }
-      db.prepare(`UPDATE conversations SET disappearing_seconds = ?, updated_at = ? WHERE id = ?`).run(
-        body.disappearingSeconds,
-        nowIso,
-        convId
-      );
-      getIO()?.to(`conv:${convId}`).emit('conversation:updated', {
-        conversationId: convId,
-        disappearingSeconds: body.disappearingSeconds,
-      });
-    }
-
-    return res.json({ success: true });
-  });
-
-  router.get('/:id/messages', requireAuth, (req: AuthedRequest, res) => {
-    const convId = req.params.id;
-    const participant = db
-      .prepare(`SELECT 1 FROM conversation_participants WHERE conversation_id = ? AND user_id = ?`)
-      .get(convId, req.userId!);
-    if (!participant) {
-      return res.status(403).json({ error: 'Access denied to this conversation.' });
-    }
-
-    const limit = Math.min(100, Math.max(10, Number(req.query.limit || 40)));
-    const before = typeof req.query.before === 'string' ? req.query.before : null;
-    const nowIso = new Date().toISOString();
-
-    const rows = (
-      before
-        ? db
-            .prepare(
-              `SELECT * FROM messages
-               WHERE conversation_id = ?
-                 AND (expires_at IS NULL OR expires_at > ?)
-                 AND created_at < ?
-               ORDER BY created_at DESC LIMIT ?`
-            )
-            .all(convId, nowIso, before, limit + 1)
-        : db
-            .prepare(
-              `SELECT * FROM messages
-               WHERE conversation_id = ?
-                 AND (expires_at IS NULL OR expires_at > ?)
-               ORDER BY created_at DESC LIMIT ?`
-            )
-            .all(convId, nowIso, limit + 1)
-    ) as Array<Parameters<typeof hydrateMessageRow>[1] & { deleted_for_users_json: string }>;
-
-    const hasMore = rows.length > limit;
-    const sliced = rows.slice(0, limit).reverse();
-
-    const messages = sliced
-      .filter((r) => {
-        try {
-          const deletedFor = JSON.parse(r.deleted_for_users_json || '[]') as string[];
-          return !deletedFor.includes(req.userId!);
-        } catch {
-          return true;
-        }
-      })
-      .map((r) => hydrateMessageRow(db, r, req.userId!));
-
-    return res.json({ messages, hasMore });
-  });
-
-  router.post('/:id/messages', requireAuth, (req: AuthedRequest, res) => {
-    const convId = req.params.id;
-    const participant = db
-      .prepare(`SELECT 1 FROM conversation_participants WHERE conversation_id = ? AND user_id = ?`)
-      .get(convId, req.userId!);
-    if (!participant) {
-      return res.status(403).json({ error: 'Not a participant in this conversation.' });
-    }
-
-    const conv = db
-      .prepare(`SELECT id, type, group_id, disappearing_seconds FROM conversations WHERE id = ?`)
-      .get(convId) as
-      | { id: string; type: 'private' | 'group'; group_id: string | null; disappearing_seconds: number }
-      | undefined;
-    if (!conv) {
-      return res.status(404).json({ error: 'Conversation not found.' });
-    }
-
-    const body = req.body || {};
-    const messageId = typeof body.id === 'string' && body.id.length <= 64 ? body.id : crypto.randomUUID();
-    const kind = ['text', 'image', 'video', 'voice', 'file', 'system'].includes(body.kind) ? body.kind : 'text';
-    const ciphertext = typeof body.ciphertext === 'string' ? body.ciphertext : '';
-    const iv = typeof body.iv === 'string' ? body.iv : '';
-    const aad = typeof body.aad === 'string' ? body.aad : '';
-    const recipientEnvelopes = body.recipientEnvelopes ? JSON.stringify(body.recipientEnvelopes) : null;
-    const epoch = typeof body.epoch === 'number' ? body.epoch : null;
-    const replyToId = typeof body.replyToId === 'string' ? body.replyToId : null;
-    const forwardedFromId = typeof body.forwardedFromId === 'string' ? body.forwardedFromId : null;
-    const attachmentId = typeof body.attachmentId === 'string' ? body.attachmentId : null;
-
-    if (!ciphertext || !iv) {
-      return res.status(400).json({ error: 'Encrypted ciphertext and IV are required.' });
-    }
-
-    if (conv.type === 'private') {
-      const other = db
-        .prepare(`SELECT user_id FROM conversation_participants WHERE conversation_id = ? AND user_id != ? LIMIT 1`)
-        .get(convId, req.userId!) as { user_id: string } | undefined;
-      if (other && isBlockedBetween(db, req.userId!, other.user_id)) {
-        return res.status(403).json({ error: 'Cannot message a blocked user.' });
-      }
-    }
-
-    // Idempotency check (protects against reconnect duplicates)
-    const existingMsg = db
-      .prepare(`SELECT * FROM messages WHERE id = ?`)
-      .get(messageId) as Parameters<typeof hydrateMessageRow>[1] | undefined;
-    if (existingMsg) {
-      return res.status(200).json({ message: hydrateMessageRow(db, existingMsg, req.userId!) });
-    }
-
-    const nowMs = Date.now();
-    const nowIso = new Date(nowMs).toISOString();
-    const expiresAt =
-      conv.disappearing_seconds > 0 ? new Date(nowMs + conv.disappearing_seconds * 1000).toISOString() : null;
-
-    db.exec('BEGIN IMMEDIATE');
-    try {
-      db.prepare(
-        `INSERT INTO messages (
-          id, conversation_id, sender_id, reply_to_id, forwarded_from_id,
-          kind, ciphertext, iv, aad, recipient_envelopes_json, epoch, attachment_id,
-          is_pinned, is_edited, deleted_for_everyone, deleted_for_users_json, expires_at, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 0, '[]', ?, ?, ?)`
-      ).run(
-        messageId,
-        convId,
-        req.userId!,
-        replyToId,
-        forwardedFromId,
-        kind,
-        ciphertext,
-        iv,
-        aad,
-        recipientEnvelopes,
-        epoch,
-        attachmentId,
-        expiresAt,
-        nowIso,
-        nowIso
-      );
-
-      db.prepare(`UPDATE conversations SET last_message_at = ?, updated_at = ? WHERE id = ?`).run(nowIso, nowIso, convId);
-      db.prepare(
-        `UPDATE conversation_participants SET unread_count = unread_count + 1
-         WHERE conversation_id = ? AND user_id != ?`
-      ).run(convId, req.userId!);
-
-      if (attachmentId && expiresAt) {
-        db.prepare(`UPDATE message_attachments SET expires_at = ? WHERE id = ?`).run(expiresAt, attachmentId);
-      }
-
-      db.exec('COMMIT');
-    } catch (err) {
-      db.exec('ROLLBACK');
-      throw err;
-    }
-
-    let updatedStreak = null;
-    if (conv.type === 'private' && kind !== 'system') {
-      const other = db
-        .prepare(`SELECT user_id FROM conversation_participants WHERE conversation_id = ? AND user_id != ? LIMIT 1`)
-        .get(convId, req.userId!) as { user_id: string } | undefined;
-      if (other) {
-        updatedStreak = recordStreakActivity(db, req.userId!, other.user_id, nowMs);
-      }
-    }
-
-    const row = db.prepare(`SELECT * FROM messages WHERE id = ?`).get(messageId) as Parameters<typeof hydrateMessageRow>[1];
-    const participants = db
-      .prepare(`SELECT user_id FROM conversation_participants WHERE conversation_id = ?`)
-      .all(convId) as Array<{ user_id: string }>;
-
-    const io = getIO();
-    if (io) {
-      for (const p of participants) {
-        const personalized = hydrateMessageRow(db, row, p.user_id);
-        io.to(`user:${p.user_id}`).emit('message:new', {
-          conversationId: convId,
-          message: personalized,
-          streak: updatedStreak,
         });
       }
-    }
 
-    return res.status(201).json({
-      message: hydrateMessageRow(db, row, req.userId!),
-      streak: updatedStreak,
-    });
+      return res.json({ conversations: result });
+    } catch (error) {
+      console.error('list conversations error:', error);
+      return res.status(500).json({ error: 'Failed to load conversations.' });
+    }
   });
 
-  router.post('/:id/read', requireAuth, async (req: AuthedRequest, res) => {
-    const convId = req.params.id;
-    const participant = db
-      .prepare(`SELECT 1 FROM conversation_participants WHERE conversation_id = ? AND user_id = ?`)
-      .get(convId, req.userId!);
-    if (!participant) {
-      return res.status(403).json({ error: 'Access denied.' });
-    }
+  router.post('/private', requireAuth, async (req: AuthedRequest, res) => {
+    try {
+      const peerId = typeof req.body?.userId === 'string' ? req.body.userId : '';
+      if (!peerId || peerId === req.userId) {
+        return res.status(400).json({ error: 'Valid recipient userId is required.' });
+      }
 
-    const nowIso = new Date().toISOString();
-    db.prepare(
-      `UPDATE conversation_participants SET unread_count = 0, last_read_at = ? WHERE conversation_id = ? AND user_id = ?`
-    ).run(nowIso, convId, req.userId!);
+      const peerExists = await database
+        .select({ id: users.id })
+        .from(users)
+        .where(eq(users.id, peerId))
+        .limit(1);
+      if (peerExists.length === 0) {
+        return res.status(404).json({ error: 'User not found.' });
+      }
 
-    const privacy = db
-      .prepare(`SELECT show_read_receipts FROM privacy_settings WHERE user_id = ?`)
-      .get(req.userId!) as { show_read_receipts: number } | undefined;
+      if (await isBlockedBetween(database, req.userId!, peerId)) {
+        return res.status(403).json({ error: 'Messaging is unavailable with this user.' });
+      }
 
-    if (!privacy || privacy.show_read_receipts === 1) {
-      const submittedReceipts = Array.isArray(req.body?.receipts)
-        ? (req.body.receipts as SignedEncryptedReadReceipt[])
-        : null;
+      const [a, b] = orderPair(req.userId!, peerId);
+      const pairKey = `${a}:${b}`;
 
-      if (submittedReceipts && submittedReceipts.length > 0) {
-        const identityRow = db
-          .prepare(`SELECT ecdsa_public_jwk FROM identity_keys WHERE user_id = ?`)
-          .get(req.userId!) as { ecdsa_public_jwk: string } | undefined;
+      const existingRows = await database
+        .select({ id: conversations.id })
+        .from(conversations)
+        .where(eq(conversations.privatePairKey, pairKey))
+        .limit(1);
 
-        if (!identityRow?.ecdsa_public_jwk) {
-          return res.status(400).json({ error: 'Reader signing key not found.' });
+      if (existingRows[0]) {
+        return res.json({ conversationId: existingRows[0].id, created: false });
+      }
+
+      const isFriend = await database
+        .select({ id: friendships.id })
+        .from(friendships)
+        .where(and(eq(friendships.userAId, a), eq(friendships.userBId, b)))
+        .limit(1);
+
+      if (isFriend.length === 0) {
+        const privacyRows = await database
+          .select({ allowChatRequests: privacySettings.allowChatRequests })
+          .from(privacySettings)
+          .where(eq(privacySettings.userId, peerId))
+          .limit(1);
+        if (privacyRows[0] && privacyRows[0].allowChatRequests === 0) {
+          return res.status(403).json({ error: 'Connect as friends first to message this user.' });
         }
+      }
 
-        const acceptedReceipts: SignedEncryptedReadReceipt[] = [];
-        for (const item of submittedReceipts.slice(0, 50)) {
-          if (
-            !item ||
-            typeof item.messageId !== 'string' ||
-            typeof item.viewedAt !== 'string' ||
-            typeof item.signature !== 'string'
-          ) {
-            continue;
-          }
+      const convId = crypto.randomUUID();
+      const nowIso = new Date().toISOString();
 
-          const targetMsg = db
-            .prepare(`SELECT id, sender_id FROM messages WHERE id = ? AND conversation_id = ?`)
-            .get(item.messageId, convId) as { id: string; sender_id: string } | undefined;
-          if (!targetMsg || targetMsg.sender_id === req.userId!) continue;
+      await database.transaction(async (tx) => {
+        await tx.insert(conversations).values({
+          id: convId,
+          type: 'private',
+          groupId: null,
+          privatePairKey: pairKey,
+          disappearingSeconds: 0,
+          lastMessageAt: null,
+          createdAt: nowIso,
+          updatedAt: nowIso,
+        });
 
-          const validSig = await verifyEcdsaReadReceiptSignature(
-            identityRow.ecdsa_public_jwk,
-            convId,
-            item.messageId,
-            req.userId!,
-            item.viewedAt,
-            item.signature
-          );
-          if (!validSig) {
-            return res.status(400).json({
-              error: 'Invalid cryptographic read receipt signature.',
-              code: 'INVALID_RECEIPT_SIGNATURE',
-            });
-          }
-
-          const encryptedPayloadJson = item.ciphertext
-            ? JSON.stringify({
-                ciphertext: item.ciphertext,
-                iv: item.iv || null,
-                aad: item.aad || null,
-                recipientEnvelopes: item.recipientEnvelopes || null,
-                epoch: typeof item.epoch === 'number' ? item.epoch : null,
-              })
-            : null;
-
-          db.prepare(
-            `INSERT INTO message_receipts (id, message_id, user_id, status, signature, signed_at, encrypted_payload_json, updated_at)
-             VALUES (?, ?, ?, 'read', ?, ?, ?, ?)
-             ON CONFLICT(message_id, user_id) DO UPDATE SET
-               status = 'read',
-               signature = excluded.signature,
-               signed_at = excluded.signed_at,
-               encrypted_payload_json = excluded.encrypted_payload_json,
-               updated_at = excluded.updated_at`
-          ).run(
-            `${item.messageId}:${req.userId!}`,
-            item.messageId,
-            req.userId!,
-            item.signature,
-            item.viewedAt,
-            encryptedPayloadJson,
-            nowIso
-          );
-
-          acceptedReceipts.push({
-            messageId: item.messageId,
-            readerId: req.userId!,
-            viewedAt: item.viewedAt,
-            signature: item.signature,
-            ciphertext: item.ciphertext || null,
-            iv: item.iv || null,
-            aad: item.aad || null,
-            recipientEnvelopes: item.recipientEnvelopes || null,
-            epoch: typeof item.epoch === 'number' ? item.epoch : null,
-          });
-        }
-
-        if (acceptedReceipts.length > 0) {
-          getIO()?.to(`conv:${convId}`).emit('message:read_batch', {
+        await tx.insert(conversationParticipants).values([
+          {
+            id: crypto.randomUUID(),
             conversationId: convId,
             userId: req.userId!,
-            messageIds: acceptedReceipts.map((r) => r.messageId),
-            receipts: acceptedReceipts,
-            updatedAt: nowIso,
-          });
-        }
-      } else {
-        const unreadMsgs = db
-          .prepare(
-            `SELECT id FROM messages
-             WHERE conversation_id = ? AND sender_id != ?
-               AND id NOT IN (SELECT message_id FROM message_receipts WHERE user_id = ? AND status = 'read')
-             ORDER BY created_at DESC LIMIT 50`
-          )
-          .all(convId, req.userId!, req.userId!) as Array<{ id: string }>;
-
-        for (const m of unreadMsgs) {
-          db.prepare(
-            `INSERT INTO message_receipts (id, message_id, user_id, status, updated_at)
-             VALUES (?, ?, ?, 'read', ?)
-             ON CONFLICT(message_id, user_id) DO UPDATE SET status = 'read', updated_at = excluded.updated_at`
-          ).run(`${m.id}:${req.userId!}`, m.id, req.userId!, nowIso);
-        }
-
-        if (unreadMsgs.length > 0) {
-          getIO()?.to(`conv:${convId}`).emit('message:read_batch', {
+            joinedAt: nowIso,
+          },
+          {
+            id: crypto.randomUUID(),
             conversationId: convId,
-            userId: req.userId!,
-            messageIds: unreadMsgs.map((m) => m.id),
-            updatedAt: nowIso,
-          });
-        }
-      }
-    }
-
-    return res.json({ success: true });
-  });
-
-  router.patch('/messages/:messageId', requireAuth, (req: AuthedRequest, res) => {
-    const msg = db
-      .prepare(`SELECT * FROM messages WHERE id = ?`)
-      .get(req.params.messageId) as
-      | (Parameters<typeof hydrateMessageRow>[1] & { deleted_for_users_json: string })
-      | undefined;
-
-    if (!msg) {
-      return res.status(404).json({ error: 'Message not found.' });
-    }
-
-    const member = db
-      .prepare(`SELECT 1 FROM conversation_participants WHERE conversation_id = ? AND user_id = ?`)
-      .get(msg.conversation_id, req.userId!);
-    if (!member) {
-      return res.status(403).json({ error: 'Access denied.' });
-    }
-
-    const body = req.body || {};
-    const nowIso = new Date().toISOString();
-
-    if (body.action === 'delete_for_me') {
-      const deletedFor = JSON.parse(msg.deleted_for_users_json || '[]') as string[];
-      if (!deletedFor.includes(req.userId!)) {
-        deletedFor.push(req.userId!);
-        db.prepare(`UPDATE messages SET deleted_for_users_json = ?, updated_at = ? WHERE id = ?`).run(
-          JSON.stringify(deletedFor),
-          nowIso,
-          msg.id
-        );
-      }
-      return res.json({ deletedForMe: true });
-    }
-
-    if (body.action === 'delete_for_everyone') {
-      if (msg.sender_id !== req.userId!) {
-        return res.status(403).json({ error: 'Only the sender can delete for everyone.' });
-      }
-      db.prepare(
-        `UPDATE messages SET deleted_for_everyone = 1, ciphertext = '', iv = '', recipient_envelopes_json = NULL, updated_at = ? WHERE id = ?`
-      ).run(nowIso, msg.id);
-      getIO()?.to(`conv:${msg.conversation_id}`).emit('message:updated', {
-        conversationId: msg.conversation_id,
-        messageId: msg.id,
-        deletedForEveryone: true,
+            userId: peerId,
+            joinedAt: nowIso,
+          },
+        ]);
       });
-      return res.json({ deletedForEveryone: true });
-    }
-
-    if (typeof body.isPinned === 'boolean') {
-      db.prepare(`UPDATE messages SET is_pinned = ?, updated_at = ? WHERE id = ?`).run(
-        body.isPinned ? 1 : 0,
-        nowIso,
-        msg.id
-      );
-      getIO()?.to(`conv:${msg.conversation_id}`).emit('message:updated', {
-        conversationId: msg.conversation_id,
-        messageId: msg.id,
-        isPinned: body.isPinned,
-      });
-      return res.json({ isPinned: body.isPinned });
-    }
-
-    if (typeof body.ciphertext === 'string' && typeof body.iv === 'string') {
-      if (msg.sender_id !== req.userId!) {
-        return res.status(403).json({ error: 'Only the sender can edit a message.' });
-      }
-      const envelopes = body.recipientEnvelopes ? JSON.stringify(body.recipientEnvelopes) : msg.recipient_envelopes_json;
-      db.prepare(
-        `UPDATE messages SET ciphertext = ?, iv = ?, aad = ?, recipient_envelopes_json = ?, is_edited = 1, updated_at = ? WHERE id = ?`
-      ).run(body.ciphertext, body.iv, body.aad || msg.aad, envelopes, nowIso, msg.id);
-
-      const updated = db.prepare(`SELECT * FROM messages WHERE id = ?`).get(msg.id) as Parameters<typeof hydrateMessageRow>[1];
-      const participants = db
-        .prepare(`SELECT user_id FROM conversation_participants WHERE conversation_id = ?`)
-        .all(msg.conversation_id) as Array<{ user_id: string }>;
 
       const io = getIO();
       if (io) {
+        io.in(`user:${req.userId!}`).socketsJoin(`conv:${convId}`);
+        io.in(`user:${peerId}`).socketsJoin(`conv:${convId}`);
+        io.to(`user:${peerId}`).emit('conversation:new', { conversationId: convId });
+      }
+
+      return res.status(201).json({ conversationId: convId, created: true });
+    } catch (error) {
+      console.error('create private conversation error:', error);
+      return res.status(500).json({ error: 'Failed to start conversation.' });
+    }
+  });
+
+  router.patch('/:id/settings', requireAuth, async (req: AuthedRequest, res) => {
+    try {
+      const convId = String(req.params.id);
+      const participant = await database
+        .select({ id: conversationParticipants.id })
+        .from(conversationParticipants)
+        .where(
+          and(
+            eq(conversationParticipants.conversationId, convId),
+            eq(conversationParticipants.userId, req.userId!)
+          )
+        )
+        .limit(1);
+      if (participant.length === 0) {
+        return res.status(403).json({ error: 'Not a participant in this conversation.' });
+      }
+
+      const body = req.body || {};
+      const nowIso = new Date().toISOString();
+
+      if (typeof body.muted === 'boolean') {
+        await database
+          .update(conversationParticipants)
+          .set({ muted: body.muted ? 1 : 0 })
+          .where(
+            and(
+              eq(conversationParticipants.conversationId, convId),
+              eq(conversationParticipants.userId, req.userId!)
+            )
+          );
+      }
+
+      if (typeof body.archived === 'boolean') {
+        await database
+          .update(conversationParticipants)
+          .set({ archived: body.archived ? 1 : 0 })
+          .where(
+            and(
+              eq(conversationParticipants.conversationId, convId),
+              eq(conversationParticipants.userId, req.userId!)
+            )
+          );
+      }
+
+      if (typeof body.disappearingSeconds === 'number') {
+        if (!ALLOWED_DISAPPEARING.has(body.disappearingSeconds)) {
+          return res.status(400).json({ error: 'Unsupported disappearing message interval.' });
+        }
+        await database
+          .update(conversations)
+          .set({ disappearingSeconds: body.disappearingSeconds, updatedAt: nowIso })
+          .where(eq(conversations.id, convId));
+        getIO()?.to(`conv:${convId}`).emit('conversation:updated', {
+          conversationId: convId,
+          disappearingSeconds: body.disappearingSeconds,
+        });
+      }
+
+      return res.json({ success: true });
+    } catch (error) {
+      console.error('conversation settings error:', error);
+      return res.status(500).json({ error: 'Failed to update conversation settings.' });
+    }
+  });
+
+  router.get('/:id/messages', requireAuth, async (req: AuthedRequest, res) => {
+    try {
+      const convId = String(req.params.id);
+      const participant = await database
+        .select({ id: conversationParticipants.id })
+        .from(conversationParticipants)
+        .where(
+          and(
+            eq(conversationParticipants.conversationId, convId),
+            eq(conversationParticipants.userId, req.userId!)
+          )
+        )
+        .limit(1);
+      if (participant.length === 0) {
+        return res.status(403).json({ error: 'Access denied to this conversation.' });
+      }
+
+      const limit = Math.min(100, Math.max(10, Number(req.query.limit || 40)));
+      const before = typeof req.query.before === 'string' ? req.query.before : null;
+      const nowIso = new Date().toISOString();
+
+      const rows = before
+        ? await database
+            .select()
+            .from(messages)
+            .where(
+              and(
+                eq(messages.conversationId, convId),
+                or(isNull(messages.expiresAt), gt(messages.expiresAt, nowIso)),
+                lt(messages.createdAt, before)
+              )
+            )
+            .orderBy(desc(messages.createdAt))
+            .limit(limit + 1)
+        : await database
+            .select()
+            .from(messages)
+            .where(
+              and(
+                eq(messages.conversationId, convId),
+                or(isNull(messages.expiresAt), gt(messages.expiresAt, nowIso))
+              )
+            )
+            .orderBy(desc(messages.createdAt))
+            .limit(limit + 1);
+
+      const hasMore = rows.length > limit;
+      const sliced = rows.slice(0, limit).reverse();
+
+      const result = [];
+      for (const r of sliced) {
+        try {
+          const deletedFor = JSON.parse(r.deletedForUsersJson || '[]') as string[];
+          if (deletedFor.includes(req.userId!)) continue;
+        } catch {
+          // keep message if parse fails
+        }
+        result.push(await hydrateMessageRow(database, r, req.userId!));
+      }
+
+      return res.json({ messages: result, hasMore });
+    } catch (error) {
+      console.error('list messages error:', error);
+      return res.status(500).json({ error: 'Failed to load messages.' });
+    }
+  });
+
+  router.post('/:id/messages', requireAuth, async (req: AuthedRequest, res) => {
+    try {
+      const convId = String(req.params.id);
+      const participant = await database
+        .select({ id: conversationParticipants.id })
+        .from(conversationParticipants)
+        .where(
+          and(
+            eq(conversationParticipants.conversationId, convId),
+            eq(conversationParticipants.userId, req.userId!)
+          )
+        )
+        .limit(1);
+      if (participant.length === 0) {
+        return res.status(403).json({ error: 'Not a participant in this conversation.' });
+      }
+
+      const convRows = await database
+        .select({
+          id: conversations.id,
+          type: conversations.type,
+          groupId: conversations.groupId,
+          disappearingSeconds: conversations.disappearingSeconds,
+        })
+        .from(conversations)
+        .where(eq(conversations.id, convId))
+        .limit(1);
+      const conv = convRows[0];
+      if (!conv) {
+        return res.status(404).json({ error: 'Conversation not found.' });
+      }
+
+      const body = req.body || {};
+      const messageId =
+        typeof body.id === 'string' && body.id.length <= 64 ? body.id : crypto.randomUUID();
+      const kind = ['text', 'image', 'video', 'voice', 'file', 'system'].includes(body.kind)
+        ? body.kind
+        : 'text';
+      const ciphertext = typeof body.ciphertext === 'string' ? body.ciphertext : '';
+      const iv = typeof body.iv === 'string' ? body.iv : '';
+      const aad = typeof body.aad === 'string' ? body.aad : '';
+      const recipientEnvelopes = body.recipientEnvelopes
+        ? JSON.stringify(body.recipientEnvelopes)
+        : null;
+      const epoch = typeof body.epoch === 'number' ? body.epoch : null;
+      const replyToId = typeof body.replyToId === 'string' ? body.replyToId : null;
+      const forwardedFromId = typeof body.forwardedFromId === 'string' ? body.forwardedFromId : null;
+      const attachmentId = typeof body.attachmentId === 'string' ? body.attachmentId : null;
+
+      if (!ciphertext || !iv) {
+        return res.status(400).json({ error: 'Encrypted ciphertext and IV are required.' });
+      }
+
+      if (conv.type === 'private') {
+        const otherRows = await database
+          .select({ userId: conversationParticipants.userId })
+          .from(conversationParticipants)
+          .where(
+            and(
+              eq(conversationParticipants.conversationId, convId),
+              ne(conversationParticipants.userId, req.userId!)
+            )
+          )
+          .limit(1);
+        const other = otherRows[0];
+        if (other && (await isBlockedBetween(database, req.userId!, other.userId))) {
+          return res.status(403).json({ error: 'Cannot message a blocked user.' });
+        }
+      }
+
+      const existingRows = await database
+        .select()
+        .from(messages)
+        .where(eq(messages.id, messageId))
+        .limit(1);
+      if (existingRows[0]) {
+        return res
+          .status(200)
+          .json({ message: await hydrateMessageRow(database, existingRows[0], req.userId!) });
+      }
+
+      const nowMs = Date.now();
+      const nowIso = new Date(nowMs).toISOString();
+      const expiresAt =
+        conv.disappearingSeconds > 0
+          ? new Date(nowMs + conv.disappearingSeconds * 1000).toISOString()
+          : null;
+
+      await database.transaction(async (tx) => {
+        await tx.insert(messages).values({
+          id: messageId,
+          conversationId: convId,
+          senderId: req.userId!,
+          replyToId,
+          forwardedFromId,
+          kind,
+          ciphertext,
+          iv,
+          aad,
+          recipientEnvelopesJson: recipientEnvelopes,
+          epoch,
+          attachmentId,
+          isPinned: 0,
+          isEdited: 0,
+          deletedForEveryone: 0,
+          deletedForUsersJson: '[]',
+          expiresAt,
+          createdAt: nowIso,
+          updatedAt: nowIso,
+        });
+
+        await tx
+          .update(conversations)
+          .set({ lastMessageAt: nowIso, updatedAt: nowIso })
+          .where(eq(conversations.id, convId));
+
+        await tx
+          .update(conversationParticipants)
+          .set({ unreadCount: sql`${conversationParticipants.unreadCount} + 1` })
+          .where(
+            and(
+              eq(conversationParticipants.conversationId, convId),
+              ne(conversationParticipants.userId, req.userId!)
+            )
+          );
+
+        if (attachmentId && expiresAt) {
+          await tx
+            .update(messageAttachments)
+            .set({ expiresAt })
+            .where(eq(messageAttachments.id, attachmentId));
+        }
+      });
+
+      let updatedStreak = null;
+      if (conv.type === 'private' && kind !== 'system') {
+        const otherRows = await database
+          .select({ userId: conversationParticipants.userId })
+          .from(conversationParticipants)
+          .where(
+            and(
+              eq(conversationParticipants.conversationId, convId),
+              ne(conversationParticipants.userId, req.userId!)
+            )
+          )
+          .limit(1);
+        if (otherRows[0]) {
+          updatedStreak = await recordStreakActivity(database, req.userId!, otherRows[0].userId, nowMs);
+        }
+      }
+
+      const rowList = await database
+        .select()
+        .from(messages)
+        .where(eq(messages.id, messageId))
+        .limit(1);
+      const row = rowList[0];
+      const participants = await database
+        .select({ userId: conversationParticipants.userId })
+        .from(conversationParticipants)
+        .where(eq(conversationParticipants.conversationId, convId));
+
+      const io = getIO();
+      if (io && row) {
         for (const p of participants) {
-          io.to(`user:${p.user_id}`).emit('message:edited', {
-            conversationId: msg.conversation_id,
-            message: hydrateMessageRow(db, updated, p.user_id),
+          const personalized = await hydrateMessageRow(database, row, p.userId);
+          io.to(`user:${p.userId}`).emit('message:new', {
+            conversationId: convId,
+            message: personalized,
+            streak: updatedStreak,
           });
         }
       }
 
-      return res.json({ message: hydrateMessageRow(db, updated, req.userId!) });
+      return res.status(201).json({
+        message: await hydrateMessageRow(database, row, req.userId!),
+        streak: updatedStreak,
+      });
+    } catch (error) {
+      console.error('send message error:', error);
+      return res.status(500).json({ error: 'Failed to send message.' });
     }
-
-    return res.status(400).json({ error: 'Unsupported message update action.' });
   });
 
-  router.post('/messages/:messageId/reactions', requireAuth, (req: AuthedRequest, res) => {
-    const emoji = typeof req.body?.emoji === 'string' ? req.body.emoji.trim().slice(0, 16) : '';
-    if (!emoji) {
-      return res.status(400).json({ error: 'Emoji is required.' });
+  router.post('/:id/read', requireAuth, async (req: AuthedRequest, res) => {
+    try {
+      const convId = String(req.params.id);
+      const participant = await database
+        .select({ id: conversationParticipants.id })
+        .from(conversationParticipants)
+        .where(
+          and(
+            eq(conversationParticipants.conversationId, convId),
+            eq(conversationParticipants.userId, req.userId!)
+          )
+        )
+        .limit(1);
+      if (participant.length === 0) {
+        return res.status(403).json({ error: 'Access denied.' });
+      }
+
+      const nowIso = new Date().toISOString();
+      await database
+        .update(conversationParticipants)
+        .set({ unreadCount: 0, lastReadAt: nowIso })
+        .where(
+          and(
+            eq(conversationParticipants.conversationId, convId),
+            eq(conversationParticipants.userId, req.userId!)
+          )
+        );
+
+      const privacyRows = await database
+        .select({ showReadReceipts: privacySettings.showReadReceipts })
+        .from(privacySettings)
+        .where(eq(privacySettings.userId, req.userId!))
+        .limit(1);
+      const privacy = privacyRows[0];
+
+      if (!privacy || privacy.showReadReceipts === 1) {
+        const submittedReceipts = Array.isArray(req.body?.receipts)
+          ? (req.body.receipts as SignedEncryptedReadReceipt[])
+          : null;
+
+        if (submittedReceipts && submittedReceipts.length > 0) {
+          const identityRows = await database
+            .select({ ecdsaPublicJwk: identityKeys.ecdsaPublicJwk })
+            .from(identityKeys)
+            .where(eq(identityKeys.userId, req.userId!))
+            .limit(1);
+          const identityRow = identityRows[0];
+
+          if (!identityRow?.ecdsaPublicJwk) {
+            return res.status(400).json({ error: 'Reader signing key not found.' });
+          }
+
+          const acceptedReceipts: SignedEncryptedReadReceipt[] = [];
+          for (const item of submittedReceipts.slice(0, 50)) {
+            if (
+              !item ||
+              typeof item.messageId !== 'string' ||
+              typeof item.viewedAt !== 'string' ||
+              typeof item.signature !== 'string'
+            ) {
+              continue;
+            }
+
+            const targetRows = await database
+              .select({ id: messages.id, senderId: messages.senderId })
+              .from(messages)
+              .where(and(eq(messages.id, item.messageId), eq(messages.conversationId, convId)))
+              .limit(1);
+            const targetMsg = targetRows[0];
+            if (!targetMsg || targetMsg.senderId === req.userId!) continue;
+
+            const validSig = await verifyEcdsaReadReceiptSignature(
+              identityRow.ecdsaPublicJwk,
+              convId,
+              item.messageId,
+              req.userId!,
+              item.viewedAt,
+              item.signature
+            );
+            if (!validSig) {
+              return res.status(400).json({
+                error: 'Invalid cryptographic read receipt signature.',
+                code: 'INVALID_RECEIPT_SIGNATURE',
+              });
+            }
+
+            const encryptedPayloadJson = item.ciphertext
+              ? JSON.stringify({
+                  ciphertext: item.ciphertext,
+                  iv: item.iv || null,
+                  aad: item.aad || null,
+                  recipientEnvelopes: item.recipientEnvelopes || null,
+                  epoch: typeof item.epoch === 'number' ? item.epoch : null,
+                })
+              : null;
+
+            await database
+              .insert(messageReceipts)
+              .values({
+                id: `${item.messageId}:${req.userId!}`,
+                messageId: item.messageId,
+                userId: req.userId!,
+                status: 'read',
+                signature: item.signature,
+                signedAt: item.viewedAt,
+                encryptedPayloadJson,
+                updatedAt: nowIso,
+              })
+              .onConflictDoUpdate({
+                target: [messageReceipts.messageId, messageReceipts.userId],
+                set: {
+                  status: 'read',
+                  signature: item.signature,
+                  signedAt: item.viewedAt,
+                  encryptedPayloadJson,
+                  updatedAt: nowIso,
+                },
+              });
+
+            acceptedReceipts.push({
+              messageId: item.messageId,
+              readerId: req.userId!,
+              viewedAt: item.viewedAt,
+              signature: item.signature,
+              ciphertext: item.ciphertext || null,
+              iv: item.iv || null,
+              aad: item.aad || null,
+              recipientEnvelopes: item.recipientEnvelopes || null,
+              epoch: typeof item.epoch === 'number' ? item.epoch : null,
+            });
+          }
+
+          if (acceptedReceipts.length > 0) {
+            getIO()?.to(`conv:${convId}`).emit('message:read_batch', {
+              conversationId: convId,
+              userId: req.userId!,
+              messageIds: acceptedReceipts.map((r) => r.messageId),
+              receipts: acceptedReceipts,
+              updatedAt: nowIso,
+            });
+          }
+        } else {
+          const readReceiptRows = await database
+            .select({ messageId: messageReceipts.messageId })
+            .from(messageReceipts)
+            .where(
+              and(eq(messageReceipts.userId, req.userId!), eq(messageReceipts.status, 'read'))
+            );
+          const alreadyReadSet = new Set(readReceiptRows.map((r) => r.messageId));
+
+          const candidateMsgs = await database
+            .select({ id: messages.id })
+            .from(messages)
+            .where(and(eq(messages.conversationId, convId), ne(messages.senderId, req.userId!)))
+            .orderBy(desc(messages.createdAt))
+            .limit(50);
+
+          const unreadMsgs = candidateMsgs.filter((m) => !alreadyReadSet.has(m.id));
+          for (const m of unreadMsgs) {
+            await database
+              .insert(messageReceipts)
+              .values({
+                id: `${m.id}:${req.userId!}`,
+                messageId: m.id,
+                userId: req.userId!,
+                status: 'read',
+                updatedAt: nowIso,
+              })
+              .onConflictDoUpdate({
+                target: [messageReceipts.messageId, messageReceipts.userId],
+                set: { status: 'read', updatedAt: nowIso },
+              });
+          }
+
+          if (unreadMsgs.length > 0) {
+            getIO()?.to(`conv:${convId}`).emit('message:read_batch', {
+              conversationId: convId,
+              userId: req.userId!,
+              messageIds: unreadMsgs.map((m) => m.id),
+              updatedAt: nowIso,
+            });
+          }
+        }
+      }
+
+      return res.json({ success: true });
+    } catch (error) {
+      console.error('mark read error:', error);
+      return res.status(500).json({ error: 'Failed to mark messages read.' });
     }
+  });
 
-    const msg = db
-      .prepare(`SELECT id, conversation_id FROM messages WHERE id = ?`)
-      .get(req.params.messageId) as { id: string; conversation_id: string } | undefined;
-    if (!msg) {
-      return res.status(404).json({ error: 'Message not found.' });
+  router.patch('/messages/:messageId', requireAuth, async (req: AuthedRequest, res) => {
+    try {
+      const msgId = String(req.params.messageId);
+      const msgRows = await database
+        .select()
+        .from(messages)
+        .where(eq(messages.id, msgId))
+        .limit(1);
+      const msg = msgRows[0];
+
+      if (!msg) {
+        return res.status(404).json({ error: 'Message not found.' });
+      }
+
+      const member = await database
+        .select({ id: conversationParticipants.id })
+        .from(conversationParticipants)
+        .where(
+          and(
+            eq(conversationParticipants.conversationId, msg.conversationId),
+            eq(conversationParticipants.userId, req.userId!)
+          )
+        )
+        .limit(1);
+      if (member.length === 0) {
+        return res.status(403).json({ error: 'Access denied.' });
+      }
+
+      const body = req.body || {};
+      const nowIso = new Date().toISOString();
+
+      if (body.action === 'delete_for_me') {
+        const deletedFor = JSON.parse(msg.deletedForUsersJson || '[]') as string[];
+        if (!deletedFor.includes(req.userId!)) {
+          deletedFor.push(req.userId!);
+          await database
+            .update(messages)
+            .set({ deletedForUsersJson: JSON.stringify(deletedFor), updatedAt: nowIso })
+            .where(eq(messages.id, msg.id));
+        }
+        return res.json({ deletedForMe: true });
+      }
+
+      if (body.action === 'delete_for_everyone') {
+        if (msg.senderId !== req.userId!) {
+          return res.status(403).json({ error: 'Only the sender can delete for everyone.' });
+        }
+        await database
+          .update(messages)
+          .set({
+            deletedForEveryone: 1,
+            ciphertext: '',
+            iv: '',
+            recipientEnvelopesJson: null,
+            updatedAt: nowIso,
+          })
+          .where(eq(messages.id, msg.id));
+        getIO()?.to(`conv:${msg.conversationId}`).emit('message:updated', {
+          conversationId: msg.conversationId,
+          messageId: msg.id,
+          deletedForEveryone: true,
+        });
+        return res.json({ deletedForEveryone: true });
+      }
+
+      if (typeof body.isPinned === 'boolean') {
+        await database
+          .update(messages)
+          .set({ isPinned: body.isPinned ? 1 : 0, updatedAt: nowIso })
+          .where(eq(messages.id, msg.id));
+        getIO()?.to(`conv:${msg.conversationId}`).emit('message:updated', {
+          conversationId: msg.conversationId,
+          messageId: msg.id,
+          isPinned: body.isPinned,
+        });
+        return res.json({ isPinned: body.isPinned });
+      }
+
+      if (typeof body.ciphertext === 'string' && typeof body.iv === 'string') {
+        if (msg.senderId !== req.userId!) {
+          return res.status(403).json({ error: 'Only the sender can edit a message.' });
+        }
+        const envelopes = body.recipientEnvelopes
+          ? JSON.stringify(body.recipientEnvelopes)
+          : msg.recipientEnvelopesJson;
+        await database
+          .update(messages)
+          .set({
+            ciphertext: body.ciphertext,
+            iv: body.iv,
+            aad: body.aad || msg.aad,
+            recipientEnvelopesJson: envelopes,
+            isEdited: 1,
+            updatedAt: nowIso,
+          })
+          .where(eq(messages.id, msg.id));
+
+        const updatedRows = await database
+          .select()
+          .from(messages)
+          .where(eq(messages.id, msg.id))
+          .limit(1);
+        const updated = updatedRows[0];
+        const participants = await database
+          .select({ userId: conversationParticipants.userId })
+          .from(conversationParticipants)
+          .where(eq(conversationParticipants.conversationId, msg.conversationId));
+
+        const io = getIO();
+        if (io && updated) {
+          for (const p of participants) {
+            io.to(`user:${p.userId}`).emit('message:edited', {
+              conversationId: msg.conversationId,
+              message: await hydrateMessageRow(database, updated, p.userId),
+            });
+          }
+        }
+
+        return res.json({ message: await hydrateMessageRow(database, updated, req.userId!) });
+      }
+
+      return res.status(400).json({ error: 'Unsupported message update action.' });
+    } catch (error) {
+      console.error('patch message error:', error);
+      return res.status(500).json({ error: 'Failed to update message.' });
     }
+  });
 
-    const member = db
-      .prepare(`SELECT 1 FROM conversation_participants WHERE conversation_id = ? AND user_id = ?`)
-      .get(msg.conversation_id, req.userId!);
-    if (!member) {
-      return res.status(403).json({ error: 'Access denied.' });
+  router.post('/messages/:messageId/reactions', requireAuth, async (req: AuthedRequest, res) => {
+    try {
+      const msgId = String(req.params.messageId);
+      const emoji = typeof req.body?.emoji === 'string' ? req.body.emoji.trim().slice(0, 16) : '';
+      if (!emoji) {
+        return res.status(400).json({ error: 'Emoji is required.' });
+      }
+
+      const msgRows = await database
+        .select({ id: messages.id, conversationId: messages.conversationId })
+        .from(messages)
+        .where(eq(messages.id, msgId))
+        .limit(1);
+      const msg = msgRows[0];
+      if (!msg) {
+        return res.status(404).json({ error: 'Message not found.' });
+      }
+
+      const member = await database
+        .select({ id: conversationParticipants.id })
+        .from(conversationParticipants)
+        .where(
+          and(
+            eq(conversationParticipants.conversationId, msg.conversationId),
+            eq(conversationParticipants.userId, req.userId!)
+          )
+        )
+        .limit(1);
+      if (member.length === 0) {
+        return res.status(403).json({ error: 'Access denied.' });
+      }
+
+      const existingRows = await database
+        .select({ id: messageReactions.id })
+        .from(messageReactions)
+        .where(
+          and(
+            eq(messageReactions.messageId, msg.id),
+            eq(messageReactions.userId, req.userId!),
+            eq(messageReactions.emoji, emoji)
+          )
+        )
+        .limit(1);
+
+      if (existingRows[0]) {
+        await database
+          .delete(messageReactions)
+          .where(eq(messageReactions.id, existingRows[0].id));
+      } else {
+        await database.insert(messageReactions).values({
+          id: crypto.randomUUID(),
+          messageId: msg.id,
+          userId: req.userId!,
+          emoji,
+          createdAt: new Date().toISOString(),
+        });
+      }
+
+      const reactionRows = await database
+        .select({
+          emoji: messageReactions.emoji,
+          userId: messageReactions.userId,
+        })
+        .from(messageReactions)
+        .where(eq(messageReactions.messageId, msg.id));
+
+      const map = new Map<string, string[]>();
+      for (const r of reactionRows) {
+        const list = map.get(r.emoji) || [];
+        list.push(r.userId);
+        map.set(r.emoji, list);
+      }
+      const reactions = Array.from(map.entries()).map(([em, userIds]) => ({
+        emoji: em,
+        userIds,
+        count: userIds.length,
+      }));
+
+      getIO()?.to(`conv:${msg.conversationId}`).emit('message:reactions', {
+        conversationId: msg.conversationId,
+        messageId: msg.id,
+        reactions,
+      });
+
+      return res.json({ reactions });
+    } catch (error) {
+      console.error('reaction toggle error:', error);
+      return res.status(500).json({ error: 'Failed to toggle reaction.' });
     }
-
-    const existing = db
-      .prepare(`SELECT id FROM message_reactions WHERE message_id = ? AND user_id = ? AND emoji = ?`)
-      .get(msg.id, req.userId!, emoji) as { id: string } | undefined;
-
-    if (existing) {
-      db.prepare(`DELETE FROM message_reactions WHERE id = ?`).run(existing.id);
-    } else {
-      db.prepare(
-        `INSERT INTO message_reactions (id, message_id, user_id, emoji, created_at) VALUES (?, ?, ?, ?, ?)`
-      ).run(crypto.randomUUID(), msg.id, req.userId!, emoji, new Date().toISOString());
-    }
-
-    const reactionRows = db
-      .prepare(`SELECT emoji, user_id FROM message_reactions WHERE message_id = ?`)
-      .all(msg.id) as Array<{ emoji: string; user_id: string }>;
-
-    const map = new Map<string, string[]>();
-    for (const r of reactionRows) {
-      const list = map.get(r.emoji) || [];
-      list.push(r.user_id);
-      map.set(r.emoji, list);
-    }
-    const reactions = Array.from(map.entries()).map(([em, userIds]) => ({
-      emoji: em,
-      userIds,
-      count: userIds.length,
-    }));
-
-    getIO()?.to(`conv:${msg.conversation_id}`).emit('message:reactions', {
-      conversationId: msg.conversation_id,
-      messageId: msg.id,
-      reactions,
-    });
-
-    return res.json({ reactions });
   });
 
   return router;

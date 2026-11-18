@@ -1,6 +1,9 @@
 import { io, type Socket } from 'socket.io-client';
 import { getStoredToken } from './api';
 
+const SOCKET_URL =
+  (import.meta.env.VITE_SOCKET_URL || import.meta.env.VITE_API_BASE_URL || '').replace(/\/+$/, '') || '/';
+
 let socket: Socket | null = null;
 
 export function connectSocket(): Socket | null {
@@ -14,8 +17,9 @@ export function connectSocket(): Socket | null {
     return socket;
   }
 
-  socket = io('/', {
+  socket = io(SOCKET_URL, {
     auth: { token },
+    withCredentials: true,
     transports: ['websocket', 'polling'],
     reconnection: true,
     reconnectionDelay: 1000,

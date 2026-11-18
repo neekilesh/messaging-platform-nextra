@@ -2,7 +2,9 @@ import test, { describe, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import crypto from 'node:crypto';
-import { createDatabase } from '../server/db.ts';
+import { eq, inArray } from 'drizzle-orm';
+import { createPool, db } from '../src/db/index.ts';
+import { emailVerifications, messages, stories, users } from '../src/db/schema.ts';
 import { createApiApp, runRetentionCleanup } from '../server/app.ts';
 import { setupSocketServer } from '../server/socket.ts';
 import { recordStreakActivity } from '../server/streaks.ts';
@@ -80,16 +82,18 @@ async function unwrapKey(
 }
 
 describe('NEXORA Full-Stack Integration & Security Suite', () => {
-  let db: ReturnType<typeof createDatabase>;
   let server: http.Server;
+  let io: ReturnType<typeof setupSocketServer>;
   let baseUrl: string;
+  const runTag = crypto.randomBytes(3).toString('hex');
+  const createdUserIds: string[] = [];
+  const createdEmails: string[] = [];
 
   before(async () => {
     process.env.NODE_ENV = 'test';
-    db = createDatabase(':memory:');
     const app = createApiApp(db);
     server = http.createServer(app);
-    setupSocketServer(server, db);
+    io = setupSocketServer(server, db);
     await new Promise<void>((resolve) => {
       server.listen(0, '127.0.0.1', () => {
         const addr = server.address() as { port: number };
@@ -100,8 +104,19 @@ describe('NEXORA Full-Stack Integration & Security Suite', () => {
   });
 
   after(async () => {
+    io?.close();
+    server?.closeAllConnections?.();
     await new Promise<void>((resolve) => server.close(() => resolve()));
-    db.close();
+    if (createdUserIds.length > 0) {
+      await db.delete(users).where(inArray(users.id, createdUserIds)).catch(() => {});
+    }
+    if (createdEmails.length > 0) {
+      await db
+        .delete(emailVerifications)
+        .where(inArray(emailVerifications.emailNormalized, createdEmails))
+        .catch(() => {});
+    }
+    await createPool().end().catch(() => {});
   });
 
   async function api(path: string, init: RequestInit = {}, token?: string) {
@@ -118,9 +133,13 @@ describe('NEXORA Full-Stack Integration & Security Suite', () => {
   }
 
   async function registerUser(email: string, username: string, password = 'StrongPass123') {
+    const uniqueEmail = email.replace('@', `+${runTag}@`);
+    const uniqueUsername = `${username}_${runTag}`;
+    createdEmails.push(uniqueEmail.toLowerCase());
+
     const otpReq = await api('/api/v1/auth/request-otp', {
       method: 'POST',
-      body: JSON.stringify({ email, purpose: 'register' }),
+      body: JSON.stringify({ email: uniqueEmail, purpose: 'register' }),
     });
     assert.equal(otpReq.status, 200);
     const otpCode = otpReq.data.devOtpPreview;
@@ -128,7 +147,7 @@ describe('NEXORA Full-Stack Integration & Security Suite', () => {
 
     const verif = await api('/api/v1/auth/verify-otp', {
       method: 'POST',
-      body: JSON.stringify({ email, otp: otpCode, purpose: 'register' }),
+      body: JSON.stringify({ email: uniqueEmail, otp: otpCode, purpose: 'register' }),
     });
     assert.equal(verif.status, 200);
 
@@ -136,10 +155,10 @@ describe('NEXORA Full-Stack Integration & Security Suite', () => {
     const reg = await api('/api/v1/auth/register', {
       method: 'POST',
       body: JSON.stringify({
-        email,
+        email: uniqueEmail,
         verificationToken: verif.data.verificationToken,
-        username,
-        displayName: username,
+        username: uniqueUsername,
+        displayName: uniqueUsername,
         password,
         keys: {
           ecdhPublicJwk: keys.ecdhPublicJwk,
@@ -149,11 +168,15 @@ describe('NEXORA Full-Stack Integration & Security Suite', () => {
       }),
     });
     assert.equal(reg.status, 201);
+    createdUserIds.push(reg.data.user.id);
     return { token: reg.data.sessionToken as string, user: reg.data.user, keys };
   }
 
   test('Auth: OTP rejection, duplicate username rejection, login, and password reset', async () => {
-    const email = 'alice@nexora.test';
+    const email = `alice+${runTag}@nexora.test`;
+    const handle = `ShadowKing_${runTag}`;
+    createdEmails.push(email.toLowerCase());
+
     const otpReq = await api('/api/v1/auth/request-otp', {
       method: 'POST',
       body: JSON.stringify({ email, purpose: 'register' }),
@@ -180,7 +203,7 @@ describe('NEXORA Full-Stack Integration & Security Suite', () => {
       body: JSON.stringify({
         email,
         verificationToken: verif.data.verificationToken,
-        username: 'ShadowKing',
+        username: handle,
         displayName: 'Shadow King',
         password: 'Password123',
         keys: {
@@ -191,22 +214,23 @@ describe('NEXORA Full-Stack Integration & Security Suite', () => {
       }),
     });
     assert.equal(reg.status, 201);
+    createdUserIds.push(reg.data.user.id);
 
     // Reject duplicate username (case-insensitive)
-    const dupCheck = await api('/api/v1/auth/check-username?username=shadowking');
+    const dupCheck = await api(`/api/v1/auth/check-username?username=${handle.toLowerCase()}`);
     assert.equal(dupCheck.data.available, false);
 
     // Reject wrong password
     const badLogin = await api('/api/v1/auth/login', {
       method: 'POST',
-      body: JSON.stringify({ identifier: 'ShadowKing', password: 'WrongPassword1' }),
+      body: JSON.stringify({ identifier: handle, password: 'WrongPassword1' }),
     });
     assert.equal(badLogin.status, 401);
 
     // Login succeeds
     const goodLogin = await api('/api/v1/auth/login', {
       method: 'POST',
-      body: JSON.stringify({ identifier: '@ShadowKing', password: 'Password123' }),
+      body: JSON.stringify({ identifier: `@${handle}`, password: 'Password123' }),
     });
     assert.equal(goodLogin.status, 200);
     assert.ok(goodLogin.data.sessionToken);
@@ -218,9 +242,9 @@ describe('NEXORA Full-Stack Integration & Security Suite', () => {
     const eve = await registerUser('e2ee_c@nexora.test', 'GalaxyQueen');
 
     // Search by username must never expose email
-    const search = await api('/api/v1/users/search?q=CyberGhost', {}, alice.token);
+    const search = await api(`/api/v1/users/search?q=${bob.user.username}`, {}, alice.token);
     assert.equal(search.status, 200);
-    assert.equal(search.data.users[0].username, 'CyberGhost');
+    assert.equal(search.data.users[0].username, bob.user.username);
     assert.equal('email' in search.data.users[0], false);
 
     // Create private conversation
@@ -269,8 +293,12 @@ describe('NEXORA Full-Stack Integration & Security Suite', () => {
     assert.equal(sendRes.status, 201);
 
     // Verify database does NOT contain plaintext
-    const dbMsg = db.prepare(`SELECT ciphertext FROM messages WHERE id = ?`).get(msgId) as { ciphertext: string };
-    assert.equal(dbMsg.ciphertext.includes('Top secret'), false);
+    const dbMsgRows = await db
+      .select({ ciphertext: messages.ciphertext })
+      .from(messages)
+      .where(eq(messages.id, msgId))
+      .limit(1);
+    assert.equal(dbMsgRows[0].ciphertext.includes('Top secret'), false);
 
     // Bob fetches & decrypts
     const bobMsgs = await api(`/api/v1/conversations/${convId}/messages`, {}, bob.token);
@@ -404,9 +432,15 @@ describe('NEXORA Full-Stack Integration & Security Suite', () => {
 
   test('Groups: 25-member transactional cap & Epoch rotation on removal', async () => {
     const owner = await registerUser('grp_owner@nexora.test', 'GroupOwner1');
-    const members = [];
-    for (let i = 1; i <= 25; i++) {
-      members.push(await registerUser(`grp_m${i}@nexora.test`, `Member_${i}`));
+    const members: Array<Awaited<ReturnType<typeof registerUser>>> = [];
+    for (let batchStart = 1; batchStart <= 25; batchStart += 5) {
+      const batch = await Promise.all(
+        Array.from({ length: 5 }, (_, idx) => {
+          const i = batchStart + idx;
+          return registerUser(`grp_m${i}@nexora.test`, `Member_${i}`);
+        })
+      );
+      members.push(...batch);
     }
 
     // Create group with owner + 23 members = 24
@@ -531,16 +565,19 @@ describe('NEXORA Full-Stack Integration & Security Suite', () => {
     assert.equal(strangerMedia.status, 403);
 
     // Expire story & run retention cleanup
-    db.prepare(`UPDATE stories SET expires_at = '2020-01-01T00:00:00.000Z' WHERE id = ?`).run(storyRes.data.id);
-    runRetentionCleanup(db);
+    await db
+      .update(stories)
+      .set({ expiresAt: '2020-01-01T00:00:00.000Z' })
+      .where(eq(stories.id, storyRes.data.id));
+    await runRetentionCleanup(db);
     const storiesAfter = await api('/api/v1/stories', {}, u2.token);
     assert.equal(storiesAfter.data.stories.length, 0);
 
     // Server-side reciprocal Streak calculation
     const t0 = Date.now();
-    const s1 = recordStreakActivity(db, u1.user.id, u2.user.id, t0);
+    const s1 = await recordStreakActivity(db, u1.user.id, u2.user.id, t0);
     assert.equal(s1.streakCount, 0);
-    const s2 = recordStreakActivity(db, u2.user.id, u1.user.id, t0 + 60_000);
+    const s2 = await recordStreakActivity(db, u2.user.id, u1.user.id, t0 + 60_000);
     assert.equal(s2.streakCount, 1);
     assert.equal(s2.isActive, true);
   });

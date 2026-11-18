@@ -1,5 +1,7 @@
 import crypto from 'node:crypto';
-import type { DatabaseSync } from 'node:sqlite';
+import { and, eq } from 'drizzle-orm';
+import type { PgDatabase } from '../src/db/index.ts';
+import { streaks } from '../src/db/schema.ts';
 import type { StreakInfo } from '../src/types/nexora.ts';
 import { createNotification } from './context.ts';
 
@@ -12,15 +14,24 @@ function orderPair(user1: string, user2: string): [string, string] {
   return user1 < user2 ? [user1, user2] : [user2, user1];
 }
 
-export function getStreakInfo(db: DatabaseSync, user1: string, user2: string, nowMs = Date.now()): StreakInfo {
+export async function getStreakInfo(
+  database: PgDatabase,
+  user1: string,
+  user2: string,
+  nowMs = Date.now()
+): Promise<StreakInfo> {
   const [userA, userB] = orderPair(user1, user2);
-  const row = db
-    .prepare(
-      `SELECT streak_count, expires_at FROM streaks WHERE user_a_id = ? AND user_b_id = ?`
-    )
-    .get(userA, userB) as { streak_count: number; expires_at: string | null } | undefined;
+  const rows = await database
+    .select({
+      streakCount: streaks.streakCount,
+      expiresAt: streaks.expiresAt,
+    })
+    .from(streaks)
+    .where(and(eq(streaks.userAId, userA), eq(streaks.userBId, userB)))
+    .limit(1);
 
-  if (!row || !row.expires_at || row.streak_count <= 0) {
+  const row = rows[0];
+  if (!row || !row.expiresAt || row.streakCount <= 0) {
     return {
       streakCount: 0,
       expiresAt: null,
@@ -30,7 +41,7 @@ export function getStreakInfo(db: DatabaseSync, user1: string, user2: string, no
     };
   }
 
-  const expiresMs = Date.parse(row.expires_at);
+  const expiresMs = Date.parse(row.expiresAt);
   if (Number.isNaN(expiresMs) || expiresMs <= nowMs) {
     return {
       streakCount: 0,
@@ -42,79 +53,75 @@ export function getStreakInfo(db: DatabaseSync, user1: string, user2: string, no
   }
 
   const remainingMs = expiresMs - nowMs;
-  const milestoneReached = MILESTONES.includes(row.streak_count) ? row.streak_count : null;
+  const milestoneReached = MILESTONES.includes(row.streakCount) ? row.streakCount : null;
 
   return {
-    streakCount: row.streak_count,
-    expiresAt: row.expires_at,
+    streakCount: row.streakCount,
+    expiresAt: row.expiresAt,
     expiringSoon: remainingMs <= EXPIRING_SOON_MS,
     isActive: true,
     milestoneReached,
   };
 }
 
-/**
- * Server-authoritative reciprocal streak engine.
- * Qualifying messages (text, image, video, voice) within a 24h window from both users
- * advance the streak once per cycle and extend the 24h expiry window.
- */
-export function recordStreakActivity(
-  db: DatabaseSync,
+export async function recordStreakActivity(
+  database: PgDatabase,
   senderId: string,
   recipientId: string,
   nowMs = Date.now()
-): StreakInfo {
+): Promise<StreakInfo> {
   const [userA, userB] = orderPair(senderId, recipientId);
   const isSenderA = senderId === userA;
   const nowIso = new Date(nowMs).toISOString();
   const nextExpiryIso = new Date(nowMs + WINDOW_24H_MS).toISOString();
 
-  // Only maintain streaks between friends or active 1-to-1 chat participants
-  const existing = db
-    .prepare(`SELECT * FROM streaks WHERE user_a_id = ? AND user_b_id = ?`)
-    .get(userA, userB) as
-    | {
-        id: string;
-        streak_count: number;
-        user_a_last_activity_at: string | null;
-        user_b_last_activity_at: string | null;
-        last_cycle_at: string | null;
-        expires_at: string | null;
-      }
-    | undefined;
+  const existingRows = await database
+    .select()
+    .from(streaks)
+    .where(and(eq(streaks.userAId, userA), eq(streaks.userBId, userB)))
+    .limit(1);
+
+  const existing = existingRows[0];
 
   if (!existing) {
     const id = crypto.randomUUID();
-    db.prepare(
-      `INSERT INTO streaks (id, user_a_id, user_b_id, streak_count, user_a_last_activity_at, user_b_last_activity_at, last_cycle_at, expires_at, updated_at)
-       VALUES (?, ?, ?, 0, ?, ?, NULL, NULL, ?)`
-    ).run(id, userA, userB, isSenderA ? nowIso : null, isSenderA ? null : nowIso, nowIso);
-    return getStreakInfo(db, userA, userB, nowMs);
+    await database.insert(streaks).values({
+      id,
+      userAId: userA,
+      userBId: userB,
+      streakCount: 0,
+      userALastActivityAt: isSenderA ? nowIso : null,
+      userBLastActivityAt: isSenderA ? null : nowIso,
+      lastCycleAt: null,
+      expiresAt: null,
+      updatedAt: nowIso,
+    });
+    return getStreakInfo(database, userA, userB, nowMs);
   }
 
-  let streakCount = existing.streak_count;
-  const expired = existing.expires_at ? Date.parse(existing.expires_at) <= nowMs : false;
+  let streakCount = existing.streakCount;
+  const expired = existing.expiresAt ? Date.parse(existing.expiresAt) <= nowMs : false;
   if (expired) {
     streakCount = 0;
   }
 
-  const aTime = isSenderA ? nowIso : existing.user_a_last_activity_at;
-  const bTime = isSenderA ? existing.user_b_last_activity_at : nowIso;
+  const aTime = isSenderA ? nowIso : existing.userALastActivityAt;
+  const bTime = isSenderA ? existing.userBLastActivityAt : nowIso;
 
   const otherTimeMs = isSenderA
-    ? existing.user_b_last_activity_at
-      ? Date.parse(existing.user_b_last_activity_at)
+    ? existing.userBLastActivityAt
+      ? Date.parse(existing.userBLastActivityAt)
       : 0
-    : existing.user_a_last_activity_at
-    ? Date.parse(existing.user_a_last_activity_at)
+    : existing.userALastActivityAt
+    ? Date.parse(existing.userALastActivityAt)
     : 0;
 
   const otherActiveWithin24h = otherTimeMs > 0 && nowMs - otherTimeMs <= WINDOW_24H_MS;
-  const lastCycleMs = existing.last_cycle_at ? Date.parse(existing.last_cycle_at) : 0;
+  const lastCycleMs = existing.lastCycleAt ? Date.parse(existing.lastCycleAt) : 0;
   const canAdvanceCycle = !lastCycleMs || nowMs - lastCycleMs >= CYCLE_COOLDOWN_MS || streakCount === 0;
 
-  let newCycleAt = existing.last_cycle_at;
-  let newExpiresAt = existing.expires_at && !expired ? nextExpiryIso : existing.expires_at;
+  let newCycleAt = existing.lastCycleAt;
+  let newExpiresAt = existing.expiresAt && !expired ? nextExpiryIso : existing.expiresAt;
 
   if (otherActiveWithin24h && canAdvanceCycle) {
     streakCount += 1;
@@ -124,7 +131,7 @@ export function recordStreakActivity(
     if (MILESTONES.includes(streakCount)) {
       for (const targetId of [userA, userB]) {
         const peerId = targetId === userA ? userB : userA;
-        createNotification(db, {
+        await createNotification(database, {
           id: crypto.randomUUID(),
           userId: targetId,
           type: 'streak_milestone',
@@ -139,16 +146,17 @@ export function recordStreakActivity(
     newExpiresAt = nextExpiryIso;
   }
 
-  db.prepare(
-    `UPDATE streaks
-     SET streak_count = ?,
-         user_a_last_activity_at = ?,
-         user_b_last_activity_at = ?,
-         last_cycle_at = ?,
-         expires_at = ?,
-         updated_at = ?
-     WHERE id = ?`
-  ).run(streakCount, aTime, bTime, newCycleAt, newExpiresAt || null, nowIso, existing.id);
+  await database
+    .update(streaks)
+    .set({
+      streakCount,
+      userALastActivityAt: aTime,
+      userBLastActivityAt: bTime,
+      lastCycleAt: newCycleAt,
+      expiresAt: newExpiresAt || null,
+      updatedAt: nowIso,
+    })
+    .where(eq(streaks.id, existing.id));
 
-  return getStreakInfo(db, userA, userB, nowMs);
+  return getStreakInfo(database, userA, userB, nowMs);
 }

@@ -1,9 +1,17 @@
 import type { Server as HttpServer } from 'node:http';
 import { Server as SocketIOServer } from 'socket.io';
-import type { DatabaseSync } from 'node:sqlite';
+import { and, eq, sql } from 'drizzle-orm';
+import type { PgDatabase } from '../src/db/index.ts';
+import {
+  conversationParticipants,
+  messageReceipts,
+  messages,
+  privacySettings,
+  users,
+} from '../src/db/schema.ts';
 import { authenticateToken, onlineUserSockets, parseCookies, setIO } from './context.ts';
 
-export function setupSocketServer(httpServer: HttpServer, db: DatabaseSync): SocketIOServer {
+export function setupSocketServer(httpServer: HttpServer, database: PgDatabase): SocketIOServer {
   const io = new SocketIOServer(httpServer, {
     cors: {
       origin: true,
@@ -14,22 +22,26 @@ export function setupSocketServer(httpServer: HttpServer, db: DatabaseSync): Soc
 
   setIO(io);
 
-  io.use((socket, next) => {
-    const authToken =
-      (typeof socket.handshake.auth?.token === 'string' && socket.handshake.auth.token) ||
-      parseCookies(socket.handshake.headers.cookie)['nexora_session'] ||
-      null;
+  io.use(async (socket, next) => {
+    try {
+      const authToken =
+        (typeof socket.handshake.auth?.token === 'string' && socket.handshake.auth.token) ||
+        parseCookies(socket.handshake.headers.cookie)['nexora_session'] ||
+        null;
 
-    const auth = authenticateToken(db, authToken);
-    if (!auth) {
+      const auth = await authenticateToken(database, authToken);
+      if (!auth) {
+        return next(new Error('UNAUTHORIZED'));
+      }
+      socket.data.userId = auth.userId;
+      socket.data.sessionId = auth.sessionId;
+      return next();
+    } catch {
       return next(new Error('UNAUTHORIZED'));
     }
-    socket.data.userId = auth.userId;
-    socket.data.sessionId = auth.sessionId;
-    return next();
   });
 
-  io.on('connection', (socket) => {
+  io.on('connection', async (socket) => {
     const userId = socket.data.userId as string;
 
     if (!onlineUserSockets.has(userId)) {
@@ -41,109 +53,183 @@ export function setupSocketServer(httpServer: HttpServer, db: DatabaseSync): Soc
 
     socket.join(`user:${userId}`);
 
-    // Join all conversation rooms this user participates in
-    const convRows = db
-      .prepare(`SELECT conversation_id FROM conversation_participants WHERE user_id = ?`)
-      .all(userId) as Array<{ conversation_id: string }>;
+    try {
+      const convRows = await database
+        .select({ conversationId: conversationParticipants.conversationId })
+        .from(conversationParticipants)
+        .where(eq(conversationParticipants.userId, userId));
 
-    for (const row of convRows) {
-      socket.join(`conv:${row.conversation_id}`);
-    }
-
-    const nowIso = new Date().toISOString();
-    db.prepare(`UPDATE users SET last_seen_at = ? WHERE id = ?`).run(nowIso, userId);
-
-    if (wasOffline) {
-      const privacy = db
-        .prepare(`SELECT show_online_status FROM privacy_settings WHERE user_id = ?`)
-        .get(userId) as { show_online_status: number } | undefined;
-      if (!privacy || privacy.show_online_status === 1) {
-        io.emit('presence:update', { userId, isOnline: true, lastSeenAt: nowIso });
+      for (const row of convRows) {
+        socket.join(`conv:${row.conversationId}`);
       }
+
+      const nowIso = new Date().toISOString();
+      await database.update(users).set({ lastSeenAt: nowIso }).where(eq(users.id, userId));
+
+      if (wasOffline) {
+        const privacyRows = await database
+          .select({ showOnlineStatus: privacySettings.showOnlineStatus })
+          .from(privacySettings)
+          .where(eq(privacySettings.userId, userId))
+          .limit(1);
+        const privacy = privacyRows[0];
+        if (!privacy || privacy.showOnlineStatus === 1) {
+          io.emit('presence:update', { userId, isOnline: true, lastSeenAt: nowIso });
+        }
+      }
+    } catch (err) {
+      console.error('Socket connection initialization DB error:', err);
     }
 
-    socket.on('conversation:join', (conversationId: string) => {
+    socket.on('conversation:join', async (conversationId: string) => {
       if (typeof conversationId !== 'string') return;
-      const member = db
-        .prepare(`SELECT 1 FROM conversation_participants WHERE conversation_id = ? AND user_id = ?`)
-        .get(conversationId, userId);
-      if (member) {
-        socket.join(`conv:${conversationId}`);
+      try {
+        const member = await database
+          .select({ id: conversationParticipants.id })
+          .from(conversationParticipants)
+          .where(
+            and(
+              eq(conversationParticipants.conversationId, conversationId),
+              eq(conversationParticipants.userId, userId)
+            )
+          )
+          .limit(1);
+        if (member.length > 0) {
+          socket.join(`conv:${conversationId}`);
+        }
+      } catch {
+        // ignore socket room check error
       }
     });
 
-    socket.on('typing:start', (payload: { conversationId?: string }) => {
+    socket.on('typing:start', async (payload: { conversationId?: string }) => {
       const conversationId = payload?.conversationId;
       if (!conversationId) return;
-      const member = db
-        .prepare(`SELECT 1 FROM conversation_participants WHERE conversation_id = ? AND user_id = ?`)
-        .get(conversationId, userId);
-      if (!member) return;
-      socket.to(`conv:${conversationId}`).emit('typing:update', {
-        conversationId,
-        userId,
-        isTyping: true,
-      });
+      try {
+        const member = await database
+          .select({ id: conversationParticipants.id })
+          .from(conversationParticipants)
+          .where(
+            and(
+              eq(conversationParticipants.conversationId, conversationId),
+              eq(conversationParticipants.userId, userId)
+            )
+          )
+          .limit(1);
+        if (member.length === 0) return;
+        socket.to(`conv:${conversationId}`).emit('typing:update', {
+          conversationId,
+          userId,
+          isTyping: true,
+        });
+      } catch {
+        // ignore typing error
+      }
     });
 
-    socket.on('typing:stop', (payload: { conversationId?: string }) => {
+    socket.on('typing:stop', async (payload: { conversationId?: string }) => {
       const conversationId = payload?.conversationId;
       if (!conversationId) return;
-      const member = db
-        .prepare(`SELECT 1 FROM conversation_participants WHERE conversation_id = ? AND user_id = ?`)
-        .get(conversationId, userId);
-      if (!member) return;
-      socket.to(`conv:${conversationId}`).emit('typing:update', {
-        conversationId,
-        userId,
-        isTyping: false,
-      });
+      try {
+        const member = await database
+          .select({ id: conversationParticipants.id })
+          .from(conversationParticipants)
+          .where(
+            and(
+              eq(conversationParticipants.conversationId, conversationId),
+              eq(conversationParticipants.userId, userId)
+            )
+          )
+          .limit(1);
+        if (member.length === 0) return;
+        socket.to(`conv:${conversationId}`).emit('typing:update', {
+          conversationId,
+          userId,
+          isTyping: false,
+        });
+      } catch {
+        // ignore typing error
+      }
     });
 
-    socket.on('message:delivered', (payload: { messageId?: string; conversationId?: string }) => {
+    socket.on('message:delivered', async (payload: { messageId?: string; conversationId?: string }) => {
       const messageId = payload?.messageId;
       if (!messageId) return;
-      const msg = db
-        .prepare(`SELECT id, conversation_id, sender_id FROM messages WHERE id = ?`)
-        .get(messageId) as { id: string; conversation_id: string; sender_id: string } | undefined;
-      if (!msg || msg.sender_id === userId) return;
+      try {
+        const msgRows = await database
+          .select({
+            id: messages.id,
+            conversationId: messages.conversationId,
+            senderId: messages.senderId,
+          })
+          .from(messages)
+          .where(eq(messages.id, messageId))
+          .limit(1);
+        const msg = msgRows[0];
+        if (!msg || msg.senderId === userId) return;
 
-      const member = db
-        .prepare(`SELECT 1 FROM conversation_participants WHERE conversation_id = ? AND user_id = ?`)
-        .get(msg.conversation_id, userId);
-      if (!member) return;
+        const member = await database
+          .select({ id: conversationParticipants.id })
+          .from(conversationParticipants)
+          .where(
+            and(
+              eq(conversationParticipants.conversationId, msg.conversationId),
+              eq(conversationParticipants.userId, userId)
+            )
+          )
+          .limit(1);
+        if (member.length === 0) return;
 
-      const ts = new Date().toISOString();
-      db.prepare(
-        `INSERT INTO message_receipts (id, message_id, user_id, status, updated_at)
-         VALUES (?, ?, ?, 'delivered', ?)
-         ON CONFLICT(message_id, user_id) DO UPDATE SET
-           status = CASE WHEN message_receipts.status = 'read' THEN 'read' ELSE 'delivered' END,
-           updated_at = excluded.updated_at`
-      ).run(`${msg.id}:${userId}`, msg.id, userId, ts);
+        const ts = new Date().toISOString();
+        await database
+          .insert(messageReceipts)
+          .values({
+            id: `${msg.id}:${userId}`,
+            messageId: msg.id,
+            userId,
+            status: 'delivered',
+            updatedAt: ts,
+          })
+          .onConflictDoUpdate({
+            target: [messageReceipts.messageId, messageReceipts.userId],
+            set: {
+              status: sql`CASE WHEN ${messageReceipts.status} = 'read' THEN 'read' ELSE 'delivered' END`,
+              updatedAt: ts,
+            },
+          });
 
-      io.to(`conv:${msg.conversation_id}`).emit('message:receipt', {
-        conversationId: msg.conversation_id,
-        messageId: msg.id,
-        userId,
-        status: 'delivered',
-        updatedAt: ts,
-      });
+        io.to(`conv:${msg.conversationId}`).emit('message:receipt', {
+          conversationId: msg.conversationId,
+          messageId: msg.id,
+          userId,
+          status: 'delivered',
+          updatedAt: ts,
+        });
+      } catch {
+        // ignore delivery receipt error
+      }
     });
 
-    socket.on('disconnect', () => {
+    socket.on('disconnect', async () => {
       const set = onlineUserSockets.get(userId);
       if (set) {
         set.delete(socket.id);
         if (set.size === 0) {
           onlineUserSockets.delete(userId);
           const disconnectIso = new Date().toISOString();
-          db.prepare(`UPDATE users SET last_seen_at = ? WHERE id = ?`).run(disconnectIso, userId);
-          const privacy = db
-            .prepare(`SELECT show_online_status FROM privacy_settings WHERE user_id = ?`)
-            .get(userId) as { show_online_status: number } | undefined;
-          if (!privacy || privacy.show_online_status === 1) {
-            io.emit('presence:update', { userId, isOnline: false, lastSeenAt: disconnectIso });
+          try {
+            await database.update(users).set({ lastSeenAt: disconnectIso }).where(eq(users.id, userId));
+            const privacyRows = await database
+              .select({ showOnlineStatus: privacySettings.showOnlineStatus })
+              .from(privacySettings)
+              .where(eq(privacySettings.userId, userId))
+              .limit(1);
+            const privacy = privacyRows[0];
+            if (!privacy || privacy.showOnlineStatus === 1) {
+              io.emit('presence:update', { userId, isOnline: false, lastSeenAt: disconnectIso });
+            }
+          } catch {
+            // ignore disconnect update error
           }
         }
       }

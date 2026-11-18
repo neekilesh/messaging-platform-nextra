@@ -1,6 +1,16 @@
 import crypto from 'node:crypto';
 import { Router } from 'express';
-import type { DatabaseSync } from 'node:sqlite';
+import { and, desc, eq, gt, isNull } from 'drizzle-orm';
+import type { PgDatabase } from '../../src/db/index.ts';
+import {
+  devices,
+  emailVerifications,
+  identityKeys,
+  privacySettings,
+  userSessions,
+  users,
+} from '../../src/db/schema.ts';
+import { adminAuth } from '../../src/lib/firebase-admin.ts';
 import {
   createRateLimiter,
   generateOtpCode,
@@ -23,9 +33,28 @@ const OTP_TTL_MS = 10 * 60 * 1000;
 const RESEND_COOLDOWN_MS = 30 * 1000;
 const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 
-export function createAuthRouter(db: DatabaseSync) {
+function isHttpsRequest(req: { secure?: boolean; headers: Record<string, string | string[] | undefined> }) {
+  return Boolean(req.secure || req.headers['x-forwarded-proto'] === 'https');
+}
+
+function setSessionCookie(
+  req: { secure?: boolean; headers: Record<string, string | string[] | undefined> },
+  res: { cookie: (name: string, val: string, opts: Record<string, unknown>) => void },
+  token: string
+) {
+  const isHttps = isHttpsRequest(req);
+  res.cookie('nexora_session', token, {
+    httpOnly: true,
+    sameSite: isHttps ? 'none' : 'lax',
+    secure: isHttps,
+    maxAge: SESSION_TTL_MS,
+    path: '/',
+  });
+}
+
+export function createAuthRouter(database: PgDatabase) {
   const router = Router();
-  const requireAuth = createRequireAuth(db);
+  const requireAuth = createRequireAuth(database);
 
   const otpLimiter = createRateLimiter({ windowMs: 60_000, max: 10, keyPrefix: 'otp' });
   const loginLimiter = createRateLimiter({ windowMs: 60_000, max: 15, keyPrefix: 'login' });
@@ -40,9 +69,12 @@ export function createAuthRouter(db: DatabaseSync) {
       }
 
       const emailH = hashEmail(emailRaw);
-      const existingUser = db
-        .prepare(`SELECT id FROM users WHERE email_hash = ?`)
-        .get(emailH) as { id: string } | undefined;
+      const existingUsers = await database
+        .select({ id: users.id })
+        .from(users)
+        .where(eq(users.emailHash, emailH))
+        .limit(1);
+      const existingUser = existingUsers[0];
 
       if (purpose === 'register' && existingUser) {
         return res.status(409).json({ error: 'An account with this email already exists.' });
@@ -54,16 +86,21 @@ export function createAuthRouter(db: DatabaseSync) {
       const nowMs = Date.now();
       const nowIso = new Date(nowMs).toISOString();
 
-      const latest = db
-        .prepare(
-          `SELECT resend_available_at FROM email_verifications
-           WHERE email_normalized = ? AND purpose = ?
-           ORDER BY created_at DESC LIMIT 1`
+      const latestRows = await database
+        .select({ resendAvailableAt: emailVerifications.resendAvailableAt })
+        .from(emailVerifications)
+        .where(
+          and(
+            eq(emailVerifications.emailNormalized, emailRaw),
+            eq(emailVerifications.purpose, purpose)
+          )
         )
-        .get(emailRaw, purpose) as { resend_available_at: string } | undefined;
+        .orderBy(desc(emailVerifications.createdAt))
+        .limit(1);
+      const latest = latestRows[0];
 
-      if (latest && Date.parse(latest.resend_available_at) > nowMs) {
-        const waitSec = Math.ceil((Date.parse(latest.resend_available_at) - nowMs) / 1000);
+      if (latest && Date.parse(latest.resendAvailableAt) > nowMs) {
+        const waitSec = Math.ceil((Date.parse(latest.resendAvailableAt) - nowMs) / 1000);
         return res.status(429).json({
           error: `Please wait ${waitSec}s before requesting another code.`,
           retryAfterSec: waitSec,
@@ -77,10 +114,18 @@ export function createAuthRouter(db: DatabaseSync) {
       const expiresAt = new Date(nowMs + OTP_TTL_MS).toISOString();
       const resendAvailableAt = new Date(nowMs + RESEND_COOLDOWN_MS).toISOString();
 
-      db.prepare(
-        `INSERT INTO email_verifications (id, email_normalized, purpose, otp_hash, salt, attempts, verified, expires_at, resend_available_at, created_at)
-         VALUES (?, ?, ?, ?, ?, 0, 0, ?, ?, ?)`
-      ).run(id, emailRaw, purpose, otpHash, salt, expiresAt, resendAvailableAt, nowIso);
+      await database.insert(emailVerifications).values({
+        id,
+        emailNormalized: emailRaw,
+        purpose,
+        otpHash,
+        salt,
+        attempts: 0,
+        verified: 0,
+        expiresAt,
+        resendAvailableAt,
+        createdAt: nowIso,
+      });
 
       const emailResult = await sendVerificationOtpEmail(emailRaw, otp, purpose);
       return res.json({
@@ -96,79 +141,321 @@ export function createAuthRouter(db: DatabaseSync) {
     }
   });
 
-  router.post('/verify-otp', otpLimiter, (req, res) => {
-    const emailRaw = typeof req.body?.email === 'string' ? req.body.email.trim().toLowerCase() : '';
-    const otp = typeof req.body?.otp === 'string' ? req.body.otp.trim() : '';
-    const purpose = req.body?.purpose === 'reset' ? 'reset' : 'register';
+  router.post('/verify-otp', otpLimiter, async (req, res) => {
+    try {
+      const emailRaw = typeof req.body?.email === 'string' ? req.body.email.trim().toLowerCase() : '';
+      const otp = typeof req.body?.otp === 'string' ? req.body.otp.trim() : '';
+      const purpose = req.body?.purpose === 'reset' ? 'reset' : 'register';
 
-    if (!emailRaw || !/^\d{6}$/.test(otp)) {
-      return res.status(400).json({ error: 'Enter a valid 6-digit verification code.' });
+      if (!emailRaw || !/^\d{6}$/.test(otp)) {
+        return res.status(400).json({ error: 'Enter a valid 6-digit verification code.' });
+      }
+
+      const records = await database
+        .select()
+        .from(emailVerifications)
+        .where(
+          and(
+            eq(emailVerifications.emailNormalized, emailRaw),
+            eq(emailVerifications.purpose, purpose)
+          )
+        )
+        .orderBy(desc(emailVerifications.createdAt))
+        .limit(1);
+
+      const record = records[0];
+      if (!record) {
+        return res.status(400).json({ error: 'No verification request found for this email.' });
+      }
+
+      if (Date.parse(record.expiresAt) <= Date.now()) {
+        return res.status(400).json({ error: 'Verification code has expired. Request a new one.' });
+      }
+
+      if (record.attempts >= 5) {
+        return res.status(429).json({ error: 'Too many invalid OTP attempts. Request a new code.' });
+      }
+
+      const valid = verifyOtpHash(emailRaw, purpose, otp, record.salt, record.otpHash);
+      if (!valid) {
+        await database
+          .update(emailVerifications)
+          .set({ attempts: record.attempts + 1 })
+          .where(eq(emailVerifications.id, record.id));
+        return res.status(400).json({ error: 'Incorrect verification code.' });
+      }
+
+      const verificationToken = generateSessionToken();
+      const tokenHash = hashSessionToken(verificationToken);
+
+      await database
+        .update(emailVerifications)
+        .set({ verified: 1, verificationTokenHash: tokenHash })
+        .where(eq(emailVerifications.id, record.id));
+
+      return res.json({
+        verified: true,
+        verificationToken,
+      });
+    } catch (error) {
+      console.error('verify-otp error:', error);
+      return res.status(500).json({ error: 'Verification check failed.' });
     }
-
-    const record = db
-      .prepare(
-        `SELECT * FROM email_verifications
-         WHERE email_normalized = ? AND purpose = ?
-         ORDER BY created_at DESC LIMIT 1`
-      )
-      .get(emailRaw, purpose) as
-      | {
-          id: string;
-          otp_hash: string;
-          salt: string;
-          attempts: number;
-          verified: number;
-          expires_at: string;
-        }
-      | undefined;
-
-    if (!record) {
-      return res.status(400).json({ error: 'No verification request found for this email.' });
-    }
-
-    if (Date.parse(record.expires_at) <= Date.now()) {
-      return res.status(400).json({ error: 'Verification code has expired. Request a new one.' });
-    }
-
-    if (record.attempts >= 5) {
-      return res.status(429).json({ error: 'Too many invalid OTP attempts. Request a new code.' });
-    }
-
-    const valid = verifyOtpHash(emailRaw, purpose, otp, record.salt, record.otp_hash);
-    if (!valid) {
-      db.prepare(`UPDATE email_verifications SET attempts = attempts + 1 WHERE id = ?`).run(record.id);
-      return res.status(400).json({ error: 'Incorrect verification code.' });
-    }
-
-    const verificationToken = generateSessionToken();
-    const tokenHash = hashSessionToken(verificationToken);
-
-    db.prepare(
-      `UPDATE email_verifications
-       SET verified = 1, verification_token_hash = ?
-       WHERE id = ?`
-    ).run(tokenHash, record.id);
-
-    return res.json({
-      verified: true,
-      verificationToken,
-    });
   });
 
-  router.get('/check-username', (req, res) => {
-    const username = typeof req.query.username === 'string' ? req.query.username : '';
-    const check = validateUsernameFormat(username);
-    if (!check.valid) {
-      return res.json({ available: false, reason: check.reason, normalized: check.normalized });
+  router.get('/check-username', async (req, res) => {
+    try {
+      const username = typeof req.query.username === 'string' ? req.query.username : '';
+      const check = validateUsernameFormat(username);
+      if (!check.valid) {
+        return res.json({ available: false, reason: check.reason, normalized: check.normalized });
+      }
+      const existing = await database
+        .select({ id: users.id })
+        .from(users)
+        .where(eq(users.usernameNormalized, check.normalized))
+        .limit(1);
+      return res.json({
+        available: existing.length === 0,
+        normalized: check.normalized,
+        ...(existing.length > 0 ? { reason: 'Username is already taken.' } : {}),
+      });
+    } catch (error) {
+      console.error('check-username error:', error);
+      return res.status(500).json({ error: 'Failed to check username availability.' });
     }
-    const existing = db
-      .prepare(`SELECT 1 FROM users WHERE username_normalized = ?`)
-      .get(check.normalized);
-    return res.json({
-      available: !existing,
-      normalized: check.normalized,
-      ...(existing ? { reason: 'Username is already taken.' } : {}),
-    });
+  });
+
+  router.post('/firebase', loginLimiter, async (req, res) => {
+    try {
+      const authHeader = req.headers.authorization;
+      if (!authHeader || !authHeader.startsWith('Bearer ')) {
+        return res.status(401).json({ error: 'Firebase ID token is required.' });
+      }
+      const idToken = authHeader.slice(7).trim();
+      const decoded = await adminAuth.verifyIdToken(idToken);
+      const emailRaw = (decoded.email || '').trim().toLowerCase();
+      if (!emailRaw) {
+        return res.status(400).json({ error: 'Google account must provide a verified email address.' });
+      }
+
+      const emailH = hashEmail(emailRaw);
+      const deviceName = typeof req.body?.deviceName === 'string' ? req.body.deviceName.slice(0, 80) : 'Web Browser';
+      const platform = typeof req.body?.platform === 'string' ? req.body.platform.slice(0, 40) : 'Web';
+
+      let existingRows = await database
+        .select()
+        .from(users)
+        .where(eq(users.uid, decoded.uid))
+        .limit(1);
+
+      if (existingRows.length === 0) {
+        existingRows = await database
+          .select()
+          .from(users)
+          .where(eq(users.emailHash, emailH))
+          .limit(1);
+
+        if (existingRows[0] && !existingRows[0].uid) {
+          await database
+            .update(users)
+            .set({ uid: decoded.uid, updatedAt: new Date().toISOString() })
+            .where(eq(users.id, existingRows[0].id));
+        }
+      }
+
+      const existingUser = existingRows[0];
+      if (existingUser) {
+        const deviceId = crypto.randomUUID();
+        const sessionId = crypto.randomUUID();
+        const rawSessionToken = generateSessionToken();
+        const sessionTokenHash = hashSessionToken(rawSessionToken);
+        const nowIso = new Date().toISOString();
+        const sessionExpiresAt = new Date(Date.now() + SESSION_TTL_MS).toISOString();
+
+        await database.insert(devices).values({
+          id: deviceId,
+          userId: existingUser.id,
+          deviceName,
+          platform,
+          lastActiveAt: nowIso,
+          createdAt: nowIso,
+        });
+
+        await database.insert(userSessions).values({
+          id: sessionId,
+          userId: existingUser.id,
+          deviceId,
+          tokenHash: sessionTokenHash,
+          userAgent: String(req.headers['user-agent'] || '').slice(0, 200),
+          ipAddress: String(req.ip || ''),
+          lastActiveAt: nowIso,
+          expiresAt: sessionExpiresAt,
+          createdAt: nowIso,
+        });
+
+        const keyRows = await database
+          .select()
+          .from(identityKeys)
+          .where(eq(identityKeys.userId, existingUser.id))
+          .limit(1);
+        const keyBackup = keyRows[0];
+
+        setSessionCookie(req, res, rawSessionToken);
+
+        const publicUser = await getPublicUserById(database, existingUser.id, existingUser.id);
+        return res.json({
+          needsProfile: false,
+          sessionToken: rawSessionToken,
+          user: {
+            ...publicUser,
+            maskedEmail: existingUser.emailMasked,
+            createdAt: existingUser.createdAt,
+          },
+          keyBackup:
+            keyBackup && keyBackup.encryptedKeyBackup
+              ? {
+                  encryptedPrivateKey: keyBackup.encryptedKeyBackup,
+                  salt: keyBackup.backupSalt,
+                  iv: keyBackup.backupIv,
+                  ecdhPublicJwk: keyBackup.ecdhPublicJwk,
+                  ecdsaPublicJwk: keyBackup.ecdsaPublicJwk,
+                  fingerprint: keyBackup.fingerprint,
+                }
+              : null,
+        });
+      }
+
+      const usernameRaw =
+        typeof req.body?.username === 'string' ? req.body.username.trim().replace(/^@+/, '') : '';
+      const displayName =
+        typeof req.body?.displayName === 'string' ? req.body.displayName.trim() : '';
+      const keys = req.body?.keys as
+        | {
+            ecdhPublicJwk?: string;
+            ecdsaPublicJwk?: string;
+            fingerprint?: string;
+            encryptedPrivateKey?: string;
+            salt?: string;
+            iv?: string;
+          }
+        | undefined;
+
+      if (!usernameRaw || !displayName || !keys?.ecdhPublicJwk || !keys?.ecdsaPublicJwk || !keys?.fingerprint) {
+        return res.json({
+          needsProfile: true,
+          email: emailRaw,
+          suggestedName: decoded.name || emailRaw.split('@')[0] || 'Explorer',
+          avatarUrl: decoded.picture || null,
+        });
+      }
+
+      const usernameCheck = validateUsernameFormat(usernameRaw);
+      if (!usernameCheck.valid) {
+        return res.status(400).json({ error: usernameCheck.reason });
+      }
+      if (displayName.length < 1 || displayName.length > 50) {
+        return res.status(400).json({ error: 'Display name must be 1 to 50 characters.' });
+      }
+
+      const conflict = await database
+        .select({ id: users.id })
+        .from(users)
+        .where(eq(users.usernameNormalized, usernameCheck.normalized))
+        .limit(1);
+      if (conflict.length > 0) {
+        return res.status(409).json({ error: 'Username is already taken.' });
+      }
+
+      const userId = crypto.randomUUID();
+      const deviceId = crypto.randomUUID();
+      const sessionId = crypto.randomUUID();
+      const rawSessionToken = generateSessionToken();
+      const sessionTokenHash = hashSessionToken(rawSessionToken);
+      const nowIso = new Date().toISOString();
+      const sessionExpiresAt = new Date(Date.now() + SESSION_TTL_MS).toISOString();
+      const masked = maskEmail(emailRaw);
+      const avatarUrl =
+        typeof req.body?.avatarUrl === 'string'
+          ? req.body.avatarUrl
+          : decoded.picture || null;
+
+      await database.transaction(async (tx) => {
+        await tx.insert(users).values({
+          id: userId,
+          uid: decoded.uid,
+          username: usernameRaw,
+          usernameNormalized: usernameCheck.normalized,
+          displayName,
+          emailHash: emailH,
+          emailMasked: masked,
+          passwordHash: 'firebase-oauth',
+          avatarUrl,
+          bio: '',
+          statusText: 'Encrypted on NEXORA',
+          lastSeenAt: nowIso,
+          createdAt: nowIso,
+          updatedAt: nowIso,
+        });
+
+        await tx.insert(privacySettings).values({
+          userId,
+          showOnlineStatus: 1,
+          showReadReceipts: 1,
+          allowChatRequests: 1,
+          storyDefaultVisibility: 'friends',
+          allowDiscoveryByUsername: 1,
+          updatedAt: nowIso,
+        });
+
+        await tx.insert(devices).values({
+          id: deviceId,
+          userId,
+          deviceName,
+          platform,
+          lastActiveAt: nowIso,
+          createdAt: nowIso,
+        });
+
+        await tx.insert(userSessions).values({
+          id: sessionId,
+          userId,
+          deviceId,
+          tokenHash: sessionTokenHash,
+          userAgent: String(req.headers['user-agent'] || '').slice(0, 200),
+          ipAddress: String(req.ip || ''),
+          lastActiveAt: nowIso,
+          expiresAt: sessionExpiresAt,
+          createdAt: nowIso,
+        });
+
+        await tx.insert(identityKeys).values({
+          id: crypto.randomUUID(),
+          userId,
+          deviceId,
+          ecdhPublicJwk: keys.ecdhPublicJwk!,
+          ecdsaPublicJwk: keys.ecdsaPublicJwk!,
+          encryptedKeyBackup: keys.encryptedPrivateKey || null,
+          backupSalt: keys.salt || null,
+          backupIv: keys.iv || null,
+          fingerprint: keys.fingerprint!,
+          createdAt: nowIso,
+          updatedAt: nowIso,
+        });
+      });
+
+      setSessionCookie(req, res, rawSessionToken);
+
+      const user = await getPublicUserById(database, userId, userId);
+      return res.status(201).json({
+        needsProfile: false,
+        sessionToken: rawSessionToken,
+        user: { ...user, maskedEmail: masked, createdAt: nowIso },
+      });
+    } catch (error) {
+      console.error('firebase auth error:', error);
+      return res.status(401).json({ error: 'Google sign-in verification failed.' });
+    }
   });
 
   router.post('/register', otpLimiter, async (req, res) => {
@@ -197,15 +484,25 @@ export function createAuthRouter(db: DatabaseSync) {
       }
 
       const tokenHash = hashSessionToken(verificationToken);
-      const verif = db
-        .prepare(
-          `SELECT id, expires_at FROM email_verifications
-           WHERE email_normalized = ? AND purpose = 'register' AND verified = 1 AND verification_token_hash = ?
-           ORDER BY created_at DESC LIMIT 1`
+      const verifRows = await database
+        .select({
+          id: emailVerifications.id,
+          expiresAt: emailVerifications.expiresAt,
+        })
+        .from(emailVerifications)
+        .where(
+          and(
+            eq(emailVerifications.emailNormalized, emailRaw),
+            eq(emailVerifications.purpose, 'register'),
+            eq(emailVerifications.verified, 1),
+            eq(emailVerifications.verificationTokenHash, tokenHash)
+          )
         )
-        .get(emailRaw, tokenHash) as { id: string; expires_at: string } | undefined;
+        .orderBy(desc(emailVerifications.createdAt))
+        .limit(1);
 
-      if (!verif || Date.parse(verif.expires_at) <= Date.now()) {
+      const verif = verifRows[0];
+      if (!verif || Date.parse(verif.expiresAt) <= Date.now()) {
         return res.status(400).json({ error: 'Email verification is invalid or expired.' });
       }
 
@@ -225,14 +522,21 @@ export function createAuthRouter(db: DatabaseSync) {
       }
 
       const emailH = hashEmail(emailRaw);
-      const existingUsername = db
-        .prepare(`SELECT 1 FROM users WHERE username_normalized = ?`)
-        .get(usernameCheck.normalized);
-      if (existingUsername) {
+      const existingUsername = await database
+        .select({ id: users.id })
+        .from(users)
+        .where(eq(users.usernameNormalized, usernameCheck.normalized))
+        .limit(1);
+      if (existingUsername.length > 0) {
         return res.status(409).json({ error: 'Username is already taken.' });
       }
-      const existingEmail = db.prepare(`SELECT 1 FROM users WHERE email_hash = ?`).get(emailH);
-      if (existingEmail) {
+
+      const existingEmail = await database
+        .select({ id: users.id })
+        .from(users)
+        .where(eq(users.emailHash, emailH))
+        .limit(1);
+      if (existingEmail.length > 0) {
         return res.status(409).json({ error: 'Email is already registered.' });
       }
 
@@ -246,72 +550,74 @@ export function createAuthRouter(db: DatabaseSync) {
       const sessionExpiresAt = new Date(Date.now() + SESSION_TTL_MS).toISOString();
       const masked = maskEmail(emailRaw);
 
-      db.exec('BEGIN IMMEDIATE');
-      try {
-        db.prepare(
-          `INSERT INTO users (id, username, username_normalized, display_name, email_hash, email_masked, password_hash, avatar_url, bio, status_text, last_seen_at, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, '', 'Encrypted on NEXORA', ?, ?, ?)`
-        ).run(userId, usernameRaw, usernameCheck.normalized, displayName, emailH, masked, passwordHash, avatarUrl, nowIso, nowIso, nowIso);
+      await database.transaction(async (tx) => {
+        await tx.insert(users).values({
+          id: userId,
+          username: usernameRaw,
+          usernameNormalized: usernameCheck.normalized,
+          displayName,
+          emailHash: emailH,
+          emailMasked: masked,
+          passwordHash,
+          avatarUrl,
+          bio: '',
+          statusText: 'Encrypted on NEXORA',
+          lastSeenAt: nowIso,
+          createdAt: nowIso,
+          updatedAt: nowIso,
+        });
 
-        db.prepare(
-          `INSERT INTO privacy_settings (user_id, show_online_status, show_read_receipts, allow_chat_requests, story_default_visibility, allow_discovery_by_username, updated_at)
-           VALUES (?, 1, 1, 1, 'friends', 1, ?)`
-        ).run(userId, nowIso);
+        await tx.insert(privacySettings).values({
+          userId,
+          showOnlineStatus: 1,
+          showReadReceipts: 1,
+          allowChatRequests: 1,
+          storyDefaultVisibility: 'friends',
+          allowDiscoveryByUsername: 1,
+          updatedAt: nowIso,
+        });
 
-        db.prepare(
-          `INSERT INTO devices (id, user_id, device_name, platform, last_active_at, created_at)
-           VALUES (?, ?, ?, ?, ?, ?)`
-        ).run(deviceId, userId, deviceName, platform, nowIso, nowIso);
+        await tx.insert(devices).values({
+          id: deviceId,
+          userId,
+          deviceName,
+          platform,
+          lastActiveAt: nowIso,
+          createdAt: nowIso,
+        });
 
-        db.prepare(
-          `INSERT INTO user_sessions (id, user_id, device_id, token_hash, user_agent, ip_address, last_active_at, expires_at, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
-        ).run(
-          sessionId,
+        await tx.insert(userSessions).values({
+          id: sessionId,
           userId,
           deviceId,
-          sessionTokenHash,
-          String(req.headers['user-agent'] || '').slice(0, 200),
-          String(req.ip || ''),
-          nowIso,
-          sessionExpiresAt,
-          nowIso
-        );
+          tokenHash: sessionTokenHash,
+          userAgent: String(req.headers['user-agent'] || '').slice(0, 200),
+          ipAddress: String(req.ip || ''),
+          lastActiveAt: nowIso,
+          expiresAt: sessionExpiresAt,
+          createdAt: nowIso,
+        });
 
-        db.prepare(
-          `INSERT INTO identity_keys (id, user_id, device_id, ecdh_public_jwk, ecdsa_public_jwk, encrypted_key_backup, backup_salt, backup_iv, fingerprint, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-        ).run(
-          crypto.randomUUID(),
+        await tx.insert(identityKeys).values({
+          id: crypto.randomUUID(),
           userId,
           deviceId,
-          keys.ecdhPublicJwk,
-          keys.ecdsaPublicJwk,
-          keys.encryptedPrivateKey || null,
-          keys.salt || null,
-          keys.iv || null,
-          keys.fingerprint,
-          nowIso,
-          nowIso
-        );
+          ecdhPublicJwk: keys.ecdhPublicJwk!,
+          ecdsaPublicJwk: keys.ecdsaPublicJwk!,
+          encryptedKeyBackup: keys.encryptedPrivateKey || null,
+          backupSalt: keys.salt || null,
+          backupIv: keys.iv || null,
+          fingerprint: keys.fingerprint!,
+          createdAt: nowIso,
+          updatedAt: nowIso,
+        });
 
-        // Consume verification token
-        db.prepare(`DELETE FROM email_verifications WHERE id = ?`).run(verif.id);
-        db.exec('COMMIT');
-      } catch (err) {
-        db.exec('ROLLBACK');
-        throw err;
-      }
-
-      res.cookie('nexora_session', rawSessionToken, {
-        httpOnly: true,
-        sameSite: 'lax',
-        secure: process.env.NODE_ENV === 'production',
-        maxAge: SESSION_TTL_MS,
-        path: '/',
+        await tx.delete(emailVerifications).where(eq(emailVerifications.id, verif.id));
       });
 
-      const user = getPublicUserById(db, userId, userId)!;
+      setSessionCookie(req, res, rawSessionToken);
+
+      const user = await getPublicUserById(database, userId, userId);
       return res.status(201).json({
         sessionToken: rawSessionToken,
         user: { ...user, maskedEmail: masked, createdAt: nowIso },
@@ -333,32 +639,35 @@ export function createAuthRouter(db: DatabaseSync) {
         return res.status(400).json({ error: 'Username or email and password are required.' });
       }
 
-      let userRow:
-        | {
-            id: string;
-            password_hash: string;
-            email_masked: string;
-            created_at: string;
-          }
-        | undefined;
+      const userRows =
+        identifierRaw.includes('@') && !identifierRaw.startsWith('@')
+          ? await database
+              .select({
+                id: users.id,
+                passwordHash: users.passwordHash,
+                emailMasked: users.emailMasked,
+                createdAt: users.createdAt,
+              })
+              .from(users)
+              .where(eq(users.emailHash, hashEmail(identifierRaw.toLowerCase())))
+              .limit(1)
+          : await database
+              .select({
+                id: users.id,
+                passwordHash: users.passwordHash,
+                emailMasked: users.emailMasked,
+                createdAt: users.createdAt,
+              })
+              .from(users)
+              .where(eq(users.usernameNormalized, identifierRaw.replace(/^@+/, '').toLowerCase()))
+              .limit(1);
 
-      if (identifierRaw.includes('@') && !identifierRaw.startsWith('@')) {
-        const emailH = hashEmail(identifierRaw.toLowerCase());
-        userRow = db
-          .prepare(`SELECT id, password_hash, email_masked, created_at FROM users WHERE email_hash = ?`)
-          .get(emailH) as typeof userRow;
-      } else {
-        const cleanUser = identifierRaw.replace(/^@+/, '').toLowerCase();
-        userRow = db
-          .prepare(`SELECT id, password_hash, email_masked, created_at FROM users WHERE username_normalized = ?`)
-          .get(cleanUser) as typeof userRow;
-      }
-
+      const userRow = userRows[0];
       if (!userRow) {
         return res.status(401).json({ error: 'Invalid credentials.' });
       }
 
-      const validPassword = await verifyPassword(password, userRow.password_hash);
+      const validPassword = await verifyPassword(password, userRow.passwordHash);
       if (!validPassword) {
         return res.status(401).json({ error: 'Invalid credentials.' });
       }
@@ -370,62 +679,55 @@ export function createAuthRouter(db: DatabaseSync) {
       const nowIso = new Date().toISOString();
       const sessionExpiresAt = new Date(Date.now() + SESSION_TTL_MS).toISOString();
 
-      db.prepare(
-        `INSERT INTO devices (id, user_id, device_name, platform, last_active_at, created_at)
-         VALUES (?, ?, ?, ?, ?, ?)`
-      ).run(deviceId, userRow.id, deviceName, platform, nowIso, nowIso);
-
-      db.prepare(
-        `INSERT INTO user_sessions (id, user_id, device_id, token_hash, user_agent, ip_address, last_active_at, expires_at, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
-      ).run(
-        sessionId,
-        userRow.id,
-        deviceId,
-        sessionTokenHash,
-        String(req.headers['user-agent'] || '').slice(0, 200),
-        String(req.ip || ''),
-        nowIso,
-        sessionExpiresAt,
-        nowIso
-      );
-
-      const keyBackup = db
-        .prepare(
-          `SELECT ecdh_public_jwk, ecdsa_public_jwk, encrypted_key_backup, backup_salt, backup_iv, fingerprint
-           FROM identity_keys WHERE user_id = ?`
-        )
-        .get(userRow.id) as
-        | {
-            ecdh_public_jwk: string;
-            ecdsa_public_jwk: string;
-            encrypted_key_backup: string | null;
-            backup_salt: string | null;
-            backup_iv: string | null;
-            fingerprint: string;
-          }
-        | undefined;
-
-      res.cookie('nexora_session', rawSessionToken, {
-        httpOnly: true,
-        sameSite: 'lax',
-        secure: process.env.NODE_ENV === 'production',
-        maxAge: SESSION_TTL_MS,
-        path: '/',
+      await database.insert(devices).values({
+        id: deviceId,
+        userId: userRow.id,
+        deviceName,
+        platform,
+        lastActiveAt: nowIso,
+        createdAt: nowIso,
       });
 
-      const user = getPublicUserById(db, userRow.id, userRow.id)!;
+      await database.insert(userSessions).values({
+        id: sessionId,
+        userId: userRow.id,
+        deviceId,
+        tokenHash: sessionTokenHash,
+        userAgent: String(req.headers['user-agent'] || '').slice(0, 200),
+        ipAddress: String(req.ip || ''),
+        lastActiveAt: nowIso,
+        expiresAt: sessionExpiresAt,
+        createdAt: nowIso,
+      });
+
+      const keyRows = await database
+        .select({
+          ecdhPublicJwk: identityKeys.ecdhPublicJwk,
+          ecdsaPublicJwk: identityKeys.ecdsaPublicJwk,
+          encryptedKeyBackup: identityKeys.encryptedKeyBackup,
+          backupSalt: identityKeys.backupSalt,
+          backupIv: identityKeys.backupIv,
+          fingerprint: identityKeys.fingerprint,
+        })
+        .from(identityKeys)
+        .where(eq(identityKeys.userId, userRow.id))
+        .limit(1);
+      const keyBackup = keyRows[0];
+
+      setSessionCookie(req, res, rawSessionToken);
+
+      const user = await getPublicUserById(database, userRow.id, userRow.id);
       return res.json({
         sessionToken: rawSessionToken,
-        user: { ...user, maskedEmail: userRow.email_masked, createdAt: userRow.created_at },
+        user: { ...user, maskedEmail: userRow.emailMasked, createdAt: userRow.createdAt },
         keyBackup:
-          keyBackup && keyBackup.encrypted_key_backup
+          keyBackup && keyBackup.encryptedKeyBackup
             ? {
-                encryptedPrivateKey: keyBackup.encrypted_key_backup,
-                salt: keyBackup.backup_salt,
-                iv: keyBackup.backup_iv,
-                ecdhPublicJwk: keyBackup.ecdh_public_jwk,
-                ecdsaPublicJwk: keyBackup.ecdsa_public_jwk,
+                encryptedPrivateKey: keyBackup.encryptedKeyBackup,
+                salt: keyBackup.backupSalt,
+                iv: keyBackup.backupIv,
+                ecdhPublicJwk: keyBackup.ecdhPublicJwk,
+                ecdsaPublicJwk: keyBackup.ecdsaPublicJwk,
                 fingerprint: keyBackup.fingerprint,
               }
             : null,
@@ -448,20 +750,35 @@ export function createAuthRouter(db: DatabaseSync) {
       }
 
       const tokenHash = hashSessionToken(verificationToken);
-      const verif = db
-        .prepare(
-          `SELECT id, expires_at FROM email_verifications
-           WHERE email_normalized = ? AND purpose = 'reset' AND verified = 1 AND verification_token_hash = ?
-           ORDER BY created_at DESC LIMIT 1`
+      const verifRows = await database
+        .select({
+          id: emailVerifications.id,
+          expiresAt: emailVerifications.expiresAt,
+        })
+        .from(emailVerifications)
+        .where(
+          and(
+            eq(emailVerifications.emailNormalized, emailRaw),
+            eq(emailVerifications.purpose, 'reset'),
+            eq(emailVerifications.verified, 1),
+            eq(emailVerifications.verificationTokenHash, tokenHash)
+          )
         )
-        .get(emailRaw, tokenHash) as { id: string; expires_at: string } | undefined;
+        .orderBy(desc(emailVerifications.createdAt))
+        .limit(1);
 
-      if (!verif || Date.parse(verif.expires_at) <= Date.now()) {
+      const verif = verifRows[0];
+      if (!verif || Date.parse(verif.expiresAt) <= Date.now()) {
         return res.status(400).json({ error: 'Password reset verification is invalid or expired.' });
       }
 
       const emailH = hashEmail(emailRaw);
-      const user = db.prepare(`SELECT id FROM users WHERE email_hash = ?`).get(emailH) as { id: string } | undefined;
+      const userRows = await database
+        .select({ id: users.id })
+        .from(users)
+        .where(eq(users.emailHash, emailH))
+        .limit(1);
+      const user = userRows[0];
       if (!user) {
         return res.status(404).json({ error: 'Account not found.' });
       }
@@ -469,16 +786,17 @@ export function createAuthRouter(db: DatabaseSync) {
       const passwordHash = await hashPassword(newPassword);
       const nowIso = new Date().toISOString();
 
-      db.exec('BEGIN IMMEDIATE');
-      try {
-        db.prepare(`UPDATE users SET password_hash = ?, updated_at = ? WHERE id = ?`).run(passwordHash, nowIso, user.id);
-        db.prepare(`UPDATE user_sessions SET revoked_at = ? WHERE user_id = ? AND revoked_at IS NULL`).run(nowIso, user.id);
-        db.prepare(`DELETE FROM email_verifications WHERE id = ?`).run(verif.id);
-        db.exec('COMMIT');
-      } catch (err) {
-        db.exec('ROLLBACK');
-        throw err;
-      }
+      await database.transaction(async (tx) => {
+        await tx
+          .update(users)
+          .set({ passwordHash, updatedAt: nowIso })
+          .where(eq(users.id, user.id));
+        await tx
+          .update(userSessions)
+          .set({ revokedAt: nowIso })
+          .where(and(eq(userSessions.userId, user.id), isNull(userSessions.revokedAt)));
+        await tx.delete(emailVerifications).where(eq(emailVerifications.id, verif.id));
+      });
 
       return res.json({ success: true });
     } catch (error) {
@@ -487,69 +805,109 @@ export function createAuthRouter(db: DatabaseSync) {
     }
   });
 
-  router.post('/logout', requireAuth, (req: AuthedRequest, res) => {
-    const nowIso = new Date().toISOString();
-    db.prepare(`UPDATE user_sessions SET revoked_at = ? WHERE id = ?`).run(nowIso, req.sessionId!);
-    res.clearCookie('nexora_session', { path: '/' });
-    return res.json({ success: true });
-  });
-
-  router.get('/me', requireAuth, (req: AuthedRequest, res) => {
-    const row = db
-      .prepare(`SELECT email_masked, created_at FROM users WHERE id = ?`)
-      .get(req.userId!) as { email_masked: string; created_at: string } | undefined;
-    const user = getPublicUserById(db, req.userId!, req.userId!);
-    if (!user || !row) {
-      return res.status(404).json({ error: 'User not found.' });
+  router.post('/logout', requireAuth, async (req: AuthedRequest, res) => {
+    try {
+      const nowIso = new Date().toISOString();
+      if (req.sessionId && !req.sessionId.startsWith('firebase:')) {
+        await database
+          .update(userSessions)
+          .set({ revokedAt: nowIso })
+          .where(eq(userSessions.id, req.sessionId));
+      }
+      const isHttps = isHttpsRequest(req);
+      res.clearCookie('nexora_session', {
+        path: '/',
+        sameSite: isHttps ? 'none' : 'lax',
+        secure: isHttps,
+      });
+      return res.json({ success: true });
+    } catch (error) {
+      console.error('logout error:', error);
+      return res.status(500).json({ error: 'Logout failed.' });
     }
-    return res.json({
-      user: { ...user, maskedEmail: row.email_masked, createdAt: row.created_at },
-    });
   });
 
-  router.get('/devices', requireAuth, (req: AuthedRequest, res) => {
-    const rows = db
-      .prepare(
-        `SELECT s.id, s.device_id, d.device_name, d.platform, s.ip_address, s.last_active_at, s.created_at
-         FROM user_sessions s
-         JOIN devices d ON d.id = s.device_id
-         WHERE s.user_id = ? AND s.revoked_at IS NULL AND s.expires_at > ?
-         ORDER BY s.last_active_at DESC`
-      )
-      .all(req.userId!, new Date().toISOString()) as Array<{
-      id: string;
-      device_id: string;
-      device_name: string;
-      platform: string;
-      ip_address: string;
-      last_active_at: string;
-      created_at: string;
-    }>;
-
-    return res.json({
-      devices: rows.map((r) => ({
-        id: r.id,
-        deviceId: r.device_id,
-        deviceName: r.device_name,
-        platform: r.platform,
-        ipAddress: r.ip_address || 'Private',
-        lastActiveAt: r.last_active_at,
-        createdAt: r.created_at,
-        isCurrent: r.id === req.sessionId,
-      })),
-    });
-  });
-
-  router.delete('/devices/:sessionId', requireAuth, (req: AuthedRequest, res) => {
-    const targetSessionId = req.params.sessionId;
-    const nowIso = new Date().toISOString();
-    const result = db
-      .prepare(`UPDATE user_sessions SET revoked_at = ? WHERE id = ? AND user_id = ?`)
-      .run(nowIso, targetSessionId, req.userId!);
-    if (result.changes === 0) {
-      return res.status(404).json({ error: 'Session not found.' });
+  router.get('/me', requireAuth, async (req: AuthedRequest, res) => {
+    try {
+      const rows = await database
+        .select({ emailMasked: users.emailMasked, createdAt: users.createdAt })
+        .from(users)
+        .where(eq(users.id, req.userId!))
+        .limit(1);
+      const row = rows[0];
+      const user = await getPublicUserById(database, req.userId!, req.userId!);
+      if (!user || !row) {
+        return res.status(404).json({ error: 'User not found.' });
+      }
+      return res.json({
+        user: { ...user, maskedEmail: row.emailMasked, createdAt: row.createdAt },
+      });
+    } catch (error) {
+      console.error('/me error:', error);
+      return res.status(500).json({ error: 'Failed to load profile.' });
     }
-    return res.json({ success: true });
+  });
+
+  router.get('/devices', requireAuth, async (req: AuthedRequest, res) => {
+    try {
+      const nowIso = new Date().toISOString();
+      const rows = await database
+        .select({
+          id: userSessions.id,
+          deviceId: userSessions.deviceId,
+          deviceName: devices.deviceName,
+          platform: devices.platform,
+          ipAddress: userSessions.ipAddress,
+          lastActiveAt: userSessions.lastActiveAt,
+          createdAt: userSessions.createdAt,
+        })
+        .from(userSessions)
+        .innerJoin(devices, eq(devices.id, userSessions.deviceId))
+        .where(
+          and(
+            eq(userSessions.userId, req.userId!),
+            isNull(userSessions.revokedAt),
+            gt(userSessions.expiresAt, nowIso)
+          )
+        )
+        .orderBy(desc(userSessions.lastActiveAt));
+
+      return res.json({
+        devices: rows.map((r) => ({
+          id: r.id,
+          deviceId: r.deviceId,
+          deviceName: r.deviceName,
+          platform: r.platform,
+          ipAddress: r.ipAddress || 'Private',
+          lastActiveAt: r.lastActiveAt,
+          createdAt: r.createdAt,
+          isCurrent: r.id === req.sessionId,
+        })),
+      });
+    } catch (error) {
+      console.error('/devices error:', error);
+      return res.status(500).json({ error: 'Failed to load active sessions.' });
+    }
+  });
+
+  router.delete('/devices/:sessionId', requireAuth, async (req: AuthedRequest, res) => {
+    try {
+      const targetSessionId = String(req.params.sessionId);
+      const nowIso = new Date().toISOString();
+      const updated = await database
+        .update(userSessions)
+        .set({ revokedAt: nowIso })
+        .where(and(eq(userSessions.id, targetSessionId), eq(userSessions.userId, req.userId!)))
+        .returning({ id: userSessions.id });
+
+      if (updated.length === 0) {
+        return res.status(404).json({ error: 'Session not found.' });
+      }
+      return res.json({ success: true });
+    } catch (error) {
+      console.error('revoke device error:', error);
+      return res.status(500).json({ error: 'Failed to revoke device session.' });
+    }
   });
 
   return router;

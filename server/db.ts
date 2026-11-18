@@ -33,6 +33,7 @@ export function initializeSchema(db: DatabaseSync): void {
       status_text TEXT NOT NULL DEFAULT 'Encrypted on NEXORA',
       last_seen_at TEXT,
       username_changed_at TEXT,
+      theme_preferences_json TEXT,
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
     );
@@ -348,6 +349,14 @@ export function initializeSchema(db: DatabaseSync): void {
   }
   if (!receiptColSet.has('encrypted_payload_json')) {
     db.exec(`ALTER TABLE message_receipts ADD COLUMN encrypted_payload_json TEXT;`);
+  }
+
+  const userCols = db
+    .prepare(`PRAGMA table_info(users)`)
+    .all() as Array<{ name: string }>;
+  const userColSet = new Set(userCols.map((c) => c.name));
+  if (!userColSet.has('theme_preferences_json')) {
+    db.exec(`ALTER TABLE users ADD COLUMN theme_preferences_json TEXT;`);
   }
 }
 

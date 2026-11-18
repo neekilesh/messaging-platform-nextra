@@ -1,6 +1,17 @@
 import type { Request, Response, NextFunction } from 'express';
-import type { DatabaseSync } from 'node:sqlite';
+import { and, eq, or } from 'drizzle-orm';
 import type { Server as SocketIOServer } from 'socket.io';
+import type { PgDatabase } from '../src/db/index.ts';
+import {
+  devices,
+  identityKeys,
+  notifications,
+  privacySettings,
+  userBlocks,
+  userSessions,
+  users,
+} from '../src/db/schema.ts';
+import { adminAuth } from '../src/lib/firebase-admin.ts';
 import { hashSessionToken } from './security.ts';
 import type { PublicUser } from '../src/types/nexora.ts';
 
@@ -8,6 +19,7 @@ export interface AuthedRequest extends Request {
   userId?: string;
   sessionId?: string;
   deviceId?: string;
+  firebaseUid?: string;
 }
 
 export const onlineUserSockets = new Map<string, Set<string>>();
@@ -54,112 +66,169 @@ export function extractSessionToken(req: Request): string | null {
   return cookies['nexora_session'] || null;
 }
 
-export function authenticateToken(db: DatabaseSync, rawToken: string | null) {
+export async function authenticateToken(database: PgDatabase, rawToken: string | null) {
   if (!rawToken) return null;
-  const tokenHash = hashSessionToken(rawToken);
-  const nowIso = new Date().toISOString();
-  const row = db
-    .prepare(
-      `SELECT s.id as session_id, s.user_id, s.device_id, s.expires_at, s.revoked_at
-       FROM user_sessions s
-       WHERE s.token_hash = ?`
-    )
-    .get(tokenHash) as
-    | {
-        session_id: string;
-        user_id: string;
-        device_id: string;
-        expires_at: string;
-        revoked_at: string | null;
-      }
-    | undefined;
+  try {
+    const tokenHash = hashSessionToken(rawToken);
+    const nowIso = new Date().toISOString();
+    const rows = await database
+      .select({
+        sessionId: userSessions.id,
+        userId: userSessions.userId,
+        deviceId: userSessions.deviceId,
+        expiresAt: userSessions.expiresAt,
+        revokedAt: userSessions.revokedAt,
+      })
+      .from(userSessions)
+      .where(eq(userSessions.tokenHash, tokenHash))
+      .limit(1);
 
-  if (!row || row.revoked_at || row.expires_at <= nowIso) {
+    const row = rows[0];
+    if (row && !row.revokedAt && row.expiresAt > nowIso) {
+      await Promise.all([
+        database
+          .update(userSessions)
+          .set({ lastActiveAt: nowIso })
+          .where(eq(userSessions.id, row.sessionId)),
+        database
+          .update(devices)
+          .set({ lastActiveAt: nowIso })
+          .where(eq(devices.id, row.deviceId)),
+      ]);
+      return {
+        userId: row.userId,
+        sessionId: row.sessionId,
+        deviceId: row.deviceId,
+      };
+    }
+
+    // Fallback: verify Firebase ID token if passed as Bearer token
+    if (rawToken.includes('.')) {
+      try {
+        const decoded = await adminAuth.verifyIdToken(rawToken);
+        const userRows = await database
+          .select({ id: users.id })
+          .from(users)
+          .where(eq(users.uid, decoded.uid))
+          .limit(1);
+        if (userRows[0]) {
+          return {
+            userId: userRows[0].id,
+            sessionId: `firebase:${decoded.uid}`,
+            deviceId: 'firebase-web',
+            firebaseUid: decoded.uid,
+          };
+        }
+      } catch {
+        return null;
+      }
+    }
+
+    return null;
+  } catch (error) {
+    console.error('authenticateToken failed:', error);
     return null;
   }
-
-  db.prepare(`UPDATE user_sessions SET last_active_at = ? WHERE id = ?`).run(nowIso, row.session_id);
-  db.prepare(`UPDATE devices SET last_active_at = ? WHERE id = ?`).run(nowIso, row.device_id);
-  return {
-    userId: row.user_id,
-    sessionId: row.session_id,
-    deviceId: row.device_id,
-  };
 }
 
-export function createRequireAuth(db: DatabaseSync) {
-  return (req: AuthedRequest, res: Response, next: NextFunction) => {
-    const token = extractSessionToken(req);
-    const auth = authenticateToken(db, token);
-    if (!auth) {
-      return res.status(401).json({ error: 'Authentication required.', code: 'UNAUTHORIZED' });
-    }
-    req.userId = auth.userId;
-    req.sessionId = auth.sessionId;
-    req.deviceId = auth.deviceId;
-    return next();
-  };
-}
-
-export function getPublicUserById(db: DatabaseSync, userId: string, viewerId?: string): PublicUser | null {
-  const row = db
-    .prepare(
-      `SELECT u.id, u.username, u.display_name, u.avatar_url, u.bio, u.status_text, u.last_seen_at,
-              ik.ecdh_public_jwk, ik.ecdsa_public_jwk, ik.fingerprint,
-              ps.show_online_status
-       FROM users u
-       LEFT JOIN identity_keys ik ON ik.user_id = u.id
-       LEFT JOIN privacy_settings ps ON ps.user_id = u.id
-       WHERE u.id = ?`
-    )
-    .get(userId) as
-    | {
-        id: string;
-        username: string;
-        display_name: string;
-        avatar_url: string | null;
-        bio: string;
-        status_text: string;
-        last_seen_at: string | null;
-        ecdh_public_jwk: string | null;
-        ecdsa_public_jwk: string | null;
-        fingerprint: string | null;
-        show_online_status: number | null;
+export function createRequireAuth(database: PgDatabase) {
+  return async (req: AuthedRequest, res: Response, next: NextFunction) => {
+    try {
+      const token = extractSessionToken(req);
+      const auth = await authenticateToken(database, token);
+      if (!auth) {
+        return res.status(401).json({ error: 'Authentication required.', code: 'UNAUTHORIZED' });
       }
-    | undefined;
-
-  if (!row) return null;
-  const allowPresence = row.show_online_status === null ? true : row.show_online_status === 1;
-  const isSelf = viewerId === row.id;
-
-  return {
-    id: row.id,
-    username: row.username,
-    displayName: row.display_name,
-    avatarUrl: row.avatar_url,
-    bio: row.bio,
-    statusText: row.status_text,
-    isOnline: (allowPresence || isSelf) ? isUserOnline(row.id) : false,
-    lastSeenAt: allowPresence || isSelf ? row.last_seen_at : null,
-    ecdhPublicJwk: row.ecdh_public_jwk || null,
-    ecdsaPublicJwk: row.ecdsa_public_jwk || null,
-    fingerprint: row.fingerprint || null,
+      req.userId = auth.userId;
+      req.sessionId = auth.sessionId;
+      req.deviceId = auth.deviceId;
+      if ('firebaseUid' in auth && auth.firebaseUid) {
+        req.firebaseUid = auth.firebaseUid;
+      }
+      return next();
+    } catch (error) {
+      console.error('Auth middleware error:', error);
+      return res.status(500).json({ error: 'Authentication verification failed.' });
+    }
   };
 }
 
-export function isBlockedBetween(db: DatabaseSync, userA: string, userB: string): boolean {
-  const row = db
-    .prepare(
-      `SELECT 1 as blocked FROM user_blocks
-       WHERE (blocker_id = ? AND blocked_id = ?) OR (blocker_id = ? AND blocked_id = ?)
-       LIMIT 1`
-    )
-    .get(userA, userB, userB, userA);
-  return Boolean(row);
+export async function getPublicUserById(
+  database: PgDatabase,
+  userId: string,
+  viewerId?: string
+): Promise<PublicUser | null> {
+  try {
+    const rows = await database
+      .select({
+        id: users.id,
+        username: users.username,
+        displayName: users.displayName,
+        avatarUrl: users.avatarUrl,
+        bio: users.bio,
+        statusText: users.statusText,
+        lastSeenAt: users.lastSeenAt,
+        ecdhPublicJwk: identityKeys.ecdhPublicJwk,
+        ecdsaPublicJwk: identityKeys.ecdsaPublicJwk,
+        fingerprint: identityKeys.fingerprint,
+        showOnlineStatus: privacySettings.showOnlineStatus,
+      })
+      .from(users)
+      .leftJoin(identityKeys, eq(identityKeys.userId, users.id))
+      .leftJoin(privacySettings, eq(privacySettings.userId, users.id))
+      .where(eq(users.id, userId))
+      .limit(1);
+
+    const row = rows[0];
+    if (!row) return null;
+
+    const allowPresence = row.showOnlineStatus === null ? true : row.showOnlineStatus === 1;
+    const isSelf = viewerId === row.id;
+
+    return {
+      id: row.id,
+      username: row.username,
+      displayName: row.displayName,
+      avatarUrl: row.avatarUrl,
+      bio: row.bio,
+      statusText: row.statusText,
+      isOnline: allowPresence || isSelf ? isUserOnline(row.id) : false,
+      lastSeenAt: allowPresence || isSelf ? row.lastSeenAt : null,
+      ecdhPublicJwk: row.ecdhPublicJwk || null,
+      ecdsaPublicJwk: row.ecdsaPublicJwk || null,
+      fingerprint: row.fingerprint || null,
+    };
+  } catch (error) {
+    console.error('getPublicUserById failed:', error);
+    throw new Error('Failed to load user profile.', { cause: error });
+  }
 }
 
-export function createNotification(
-  db: DatabaseSync,
+export async function isBlockedBetween(
+  database: PgDatabase,
+  userA: string,
+  userB: string
+): Promise<boolean> {
+  try {
+    const rows = await database
+      .select({ id: userBlocks.id })
+      .from(userBlocks)
+      .where(
+        or(
+          and(eq(userBlocks.blockerId, userA), eq(userBlocks.blockedId, userB)),
+          and(eq(userBlocks.blockerId, userB), eq(userBlocks.blockedId, userA))
+        )
+      )
+      .limit(1);
+    return rows.length > 0;
+  } catch (error) {
+    console.error('isBlockedBetween failed:', error);
+    return false;
+  }
+}
+
+export async function createNotification(
+  database: PgDatabase,
   params: {
     id: string;
     userId: string;
@@ -171,22 +240,33 @@ export function createNotification(
   }
 ) {
   const nowIso = new Date().toISOString();
-  db.prepare(
-    `INSERT INTO notifications (id, user_id, type, actor_id, entity_id, title, body, is_read, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?)`
-  ).run(params.id, params.userId, params.type, params.actorId || null, params.entityId || null, params.title, params.body, nowIso);
-
-  const io = getIO();
-  if (io) {
-    io.to(`user:${params.userId}`).emit('notification:new', {
+  try {
+    await database.insert(notifications).values({
       id: params.id,
+      userId: params.userId,
       type: params.type,
       actorId: params.actorId || null,
       entityId: params.entityId || null,
       title: params.title,
       body: params.body,
-      isRead: false,
+      isRead: 0,
       createdAt: nowIso,
     });
+
+    const io = getIO();
+    if (io) {
+      io.to(`user:${params.userId}`).emit('notification:new', {
+        id: params.id,
+        type: params.type,
+        actorId: params.actorId || null,
+        entityId: params.entityId || null,
+        title: params.title,
+        body: params.body,
+        isRead: false,
+        createdAt: nowIso,
+      });
+    }
+  } catch (error) {
+    console.error('createNotification failed:', error);
   }
 }

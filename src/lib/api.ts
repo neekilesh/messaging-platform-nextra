@@ -1,4 +1,11 @@
 const TOKEN_KEY = 'nexora_token';
+const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || '').replace(/\/+$/, '');
+
+export function apiUrl(path: string): string {
+  if (/^https?:\/\//i.test(path)) return path;
+  const normalized = path.startsWith('/') ? path : `/${path}`;
+  return `${API_BASE_URL}${normalized}`;
+}
 
 export function getStoredToken(): string | null {
   return sessionStorage.getItem(TOKEN_KEY) || localStorage.getItem(TOKEN_KEY);
@@ -24,7 +31,7 @@ export async function apiRequest<T>(path: string, options: RequestInit = {}): Pr
     headers.set('Content-Type', 'application/json');
   }
 
-  const res = await fetch(path, {
+  const res = await fetch(apiUrl(path), {
     ...options,
     headers,
     credentials: 'include',
@@ -32,13 +39,23 @@ export async function apiRequest<T>(path: string, options: RequestInit = {}): Pr
 
   if (!res.ok) {
     let errMsg = `Request failed (${res.status})`;
+    const contentType = res.headers.get('content-type') || '';
     try {
-      const data = await res.json();
-      if (data?.error) errMsg = data.error;
+      if (contentType.includes('application/json')) {
+        const data = await res.json();
+        if (data?.error) errMsg = data.error;
+      } else if (res.status === 404) {
+        errMsg = 'API service unreachable (404). Make sure the NEXORA Node server is running or VITE_API_BASE_URL is configured.';
+      }
     } catch {
       // ignore non-json error body
     }
     throw new Error(errMsg);
+  }
+
+  const contentType = res.headers.get('content-type') || '';
+  if (!contentType.includes('application/json')) {
+    throw new Error('Unexpected response from server. Ensure the NEXORA API server is running.');
   }
 
   return (await res.json()) as T;
@@ -70,7 +87,7 @@ export async function uploadEncryptedMedia(
     encryptedBytes.byteOffset + encryptedBytes.byteLength
   ) as ArrayBuffer;
 
-  const res = await fetch('/api/v1/media/upload', {
+  const res = await fetch(apiUrl('/api/v1/media/upload'), {
     method: 'POST',
     headers,
     body: bodyBytes,
@@ -90,7 +107,7 @@ export async function fetchEncryptedMediaBytes(attachmentId: string): Promise<Ar
   const headers: Record<string, string> = {};
   if (token) headers['Authorization'] = `Bearer ${token}`;
 
-  const res = await fetch(`/api/v1/media/${attachmentId}`, {
+  const res = await fetch(apiUrl(`/api/v1/media/${attachmentId}`), {
     headers,
     credentials: 'include',
   });

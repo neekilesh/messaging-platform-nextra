@@ -1,6 +1,13 @@
 import fs from 'node:fs';
 import express from 'express';
-import type { DatabaseSync } from 'node:sqlite';
+import { and, isNotNull, lte, eq } from 'drizzle-orm';
+import type { PgDatabase } from '../src/db/index.ts';
+import {
+  emailVerifications,
+  messageAttachments,
+  messages,
+  stories,
+} from '../src/db/schema.ts';
 import { createAuthRouter } from './routes/auth.ts';
 import { createUsersRouter } from './routes/users.ts';
 import { createFriendsRouter } from './routes/friends.ts';
@@ -11,71 +18,99 @@ import { createStoriesRouter } from './routes/stories.ts';
 import { createNotificationsRouter } from './routes/notifications.ts';
 import { getIO } from './context.ts';
 
-export function runRetentionCleanup(db: DatabaseSync) {
+export async function runRetentionCleanup(database: PgDatabase) {
   const nowIso = new Date().toISOString();
 
-  // Delete expired encrypted attachments from disk first
-  const expiredAttachments = db
-    .prepare(
-      `SELECT id, storage_path FROM message_attachments
-       WHERE expires_at IS NOT NULL AND expires_at <= ?`
-    )
-    .all(nowIso) as Array<{ id: string; storage_path: string }>;
+  const expiredAttachments = await database
+    .select({
+      id: messageAttachments.id,
+      storagePath: messageAttachments.storagePath,
+    })
+    .from(messageAttachments)
+    .where(and(isNotNull(messageAttachments.expiresAt), lte(messageAttachments.expiresAt, nowIso)));
 
   for (const att of expiredAttachments) {
     try {
-      if (fs.existsSync(att.storage_path)) {
-        fs.unlinkSync(att.storage_path);
+      if (fs.existsSync(att.storagePath)) {
+        fs.unlinkSync(att.storagePath);
       }
     } catch {
       // Ignore file unlink errors during cleanup
     }
-    db.prepare(`DELETE FROM message_attachments WHERE id = ?`).run(att.id);
+    await database.delete(messageAttachments).where(eq(messageAttachments.id, att.id));
   }
 
-  // Delete expired disappearing messages & broadcast removals
-  const expiredMsgs = db
-    .prepare(`SELECT id, conversation_id FROM messages WHERE expires_at IS NOT NULL AND expires_at <= ?`)
-    .all(nowIso) as Array<{ id: string; conversation_id: string }>;
+  const expiredMsgs = await database
+    .select({
+      id: messages.id,
+      conversationId: messages.conversationId,
+    })
+    .from(messages)
+    .where(and(isNotNull(messages.expiresAt), lte(messages.expiresAt, nowIso)));
 
   if (expiredMsgs.length > 0) {
-    db.prepare(`DELETE FROM messages WHERE expires_at IS NOT NULL AND expires_at <= ?`).run(nowIso);
+    await database
+      .delete(messages)
+      .where(and(isNotNull(messages.expiresAt), lte(messages.expiresAt, nowIso)));
+
     const io = getIO();
     if (io) {
       for (const m of expiredMsgs) {
-        io.to(`conv:${m.conversation_id}`).emit('message:expired', {
-          conversationId: m.conversation_id,
+        io.to(`conv:${m.conversationId}`).emit('message:expired', {
+          conversationId: m.conversationId,
           messageId: m.id,
         });
       }
     }
   }
 
-  // Delete expired 24-hour stories
-  db.prepare(`DELETE FROM stories WHERE expires_at <= ?`).run(nowIso);
-
-  // Delete expired unverified OTPs
-  db.prepare(`DELETE FROM email_verifications WHERE expires_at <= ?`).run(nowIso);
+  await database.delete(stories).where(lte(stories.expiresAt, nowIso));
+  await database.delete(emailVerifications).where(lte(emailVerifications.expiresAt, nowIso));
 }
 
-export function createApiApp(db: DatabaseSync) {
+export function createApiApp(database: PgDatabase) {
   const app = express();
 
+  app.set('trust proxy', 1);
   app.disable('x-powered-by');
+
+  // Allow cross-origin requests from Netlify or configured origins with credentials
+  app.use((req, res, next) => {
+    const origin = req.headers.origin;
+    if (origin) {
+      res.setHeader('Access-Control-Allow-Origin', origin);
+      res.setHeader('Vary', 'Origin');
+      res.setHeader('Access-Control-Allow-Credentials', 'true');
+      res.setHeader(
+        'Access-Control-Allow-Headers',
+        'Origin, X-Requested-With, Content-Type, Accept, Authorization, x-nexora-conversation-id, x-nexora-story, x-nexora-mime-type, x-nexora-original-size, x-nexora-duration-ms'
+      );
+      res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PATCH, DELETE, OPTIONS');
+    }
+    if (req.method === 'OPTIONS') {
+      return res.status(204).end();
+    }
+    return next();
+  });
+
   app.use(express.json({ limit: '5mb' }));
 
   app.get('/api/v1/health', (_req, res) => {
     res.json({ status: 'ok', service: 'nexora' });
   });
 
-  app.use('/api/v1/auth', createAuthRouter(db));
-  app.use('/api/v1/users', createUsersRouter(db));
-  app.use('/api/v1/friends', createFriendsRouter(db));
-  app.use('/api/v1/conversations', createConversationsRouter(db));
-  app.use('/api/v1/groups', createGroupsRouter(db));
-  app.use('/api/v1/media', createMediaRouter(db));
-  app.use('/api/v1/stories', createStoriesRouter(db));
-  app.use('/api/v1/notifications', createNotificationsRouter(db));
+  app.use('/api/v1/auth', createAuthRouter(database));
+  app.use('/api/v1/users', createUsersRouter(database));
+  app.use('/api/v1/friends', createFriendsRouter(database));
+  app.use('/api/v1/conversations', createConversationsRouter(database));
+  app.use('/api/v1/groups', createGroupsRouter(database));
+  app.use('/api/v1/media', createMediaRouter(database));
+  app.use('/api/v1/stories', createStoriesRouter(database));
+  app.use('/api/v1/notifications', createNotificationsRouter(database));
+
+  app.use('/api', (_req, res) => {
+    return res.status(404).json({ error: 'API endpoint not found.' });
+  });
 
   return app;
 }

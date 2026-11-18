@@ -38,14 +38,18 @@ export default defineConfig(() => {
     },
 
     server: {
-      // Allow the deployed hosting platform
-      allowedHosts: ['messaging-platform-nextra.onrender.com'],
+      // Allow deployed hosting platforms (Render, Netlify, reverse proxies)
+      allowedHosts: true as const,
 
       // HMR is disabled in AI Studio via DISABLE_HMR env var.
       hmr: process.env.DISABLE_HMR !== 'true',
 
       // Disable file watching when DISABLE_HMR is true.
       watch: process.env.DISABLE_HMR === 'true' ? null : {},
+    },
+
+    preview: {
+      allowedHosts: true as const,
     },
   };
 });

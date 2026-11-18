@@ -1,8 +1,9 @@
 import 'dotenv/config';
+import fs from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
 import express from 'express';
-import { db } from './server/db.ts';
+import { db } from './src/db/index.ts';
 import { createApiApp, runRetentionCleanup } from './server/app.ts';
 import { setupSocketServer } from './server/socket.ts';
 
@@ -11,30 +12,28 @@ async function startServer() {
   const httpServer = http.createServer(app);
   setupSocketServer(httpServer, db);
 
-  // Periodic background cleanup for disappearing messages and expired 24h stories
   const cleanupTimer = setInterval(() => {
-    try {
-      runRetentionCleanup(db);
-    } catch (err) {
+    runRetentionCleanup(db).catch((err) => {
       console.error('Retention cleanup error:', err);
-    }
+    });
   }, 5_000);
   cleanupTimer.unref();
 
   const isProd = process.env.NODE_ENV === 'production';
+  const distDir = path.resolve(process.cwd(), 'dist');
+  const distIndex = path.join(distDir, 'index.html');
 
-  if (!isProd) {
+  if (!isProd || !fs.existsSync(distIndex)) {
     const { createServer: createViteServer } = await import('vite');
     const vite = await createViteServer({
-      server: { middlewareMode: true, hmr: false },
+      server: { middlewareMode: true, hmr: false, allowedHosts: true },
       appType: 'spa',
     });
     app.use(vite.middlewares);
   } else {
-    const distDir = path.resolve(process.cwd(), 'dist');
     app.use(express.static(distDir));
-    app.get('*', (_req, res) => {
-      res.sendFile(path.join(distDir, 'index.html'));
+    app.get(/^\/(?!api(?:\/|$)).*/, (_req, res) => {
+      res.sendFile(distIndex);
     });
   }
 

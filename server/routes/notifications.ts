@@ -1,56 +1,68 @@
 import { Router } from 'express';
-import type { DatabaseSync } from 'node:sqlite';
+import { desc, eq } from 'drizzle-orm';
+import type { PgDatabase } from '../../src/db/index.ts';
+import { notifications, users } from '../../src/db/schema.ts';
 import { createRequireAuth } from '../context.ts';
 import type { AuthedRequest } from '../context.ts';
 
-export function createNotificationsRouter(db: DatabaseSync) {
+export function createNotificationsRouter(database: PgDatabase) {
   const router = Router();
-  const requireAuth = createRequireAuth(db);
+  const requireAuth = createRequireAuth(database);
 
-  router.get('/', requireAuth, (req: AuthedRequest, res) => {
-    const rows = db
-      .prepare(
-        `SELECT n.*, u.username as actor_username, u.display_name as actor_display_name, u.avatar_url as actor_avatar_url
-         FROM notifications n
-         LEFT JOIN users u ON u.id = n.actor_id
-         WHERE n.user_id = ?
-         ORDER BY n.created_at DESC
-         LIMIT 50`
-      )
-      .all(req.userId!) as Array<{
-      id: string;
-      type: string;
-      actor_id: string | null;
-      actor_username: string | null;
-      actor_display_name: string | null;
-      actor_avatar_url: string | null;
-      entity_id: string | null;
-      title: string;
-      body: string;
-      is_read: number;
-      created_at: string;
-    }>;
+  router.get('/', requireAuth, async (req: AuthedRequest, res) => {
+    try {
+      const rows = await database
+        .select({
+          id: notifications.id,
+          type: notifications.type,
+          actorId: notifications.actorId,
+          actorUsername: users.username,
+          actorDisplayName: users.displayName,
+          actorAvatarUrl: users.avatarUrl,
+          entityId: notifications.entityId,
+          title: notifications.title,
+          body: notifications.body,
+          isRead: notifications.isRead,
+          createdAt: notifications.createdAt,
+        })
+        .from(notifications)
+        .leftJoin(users, eq(users.id, notifications.actorId))
+        .where(eq(notifications.userId, req.userId!))
+        .orderBy(desc(notifications.createdAt))
+        .limit(50);
 
-    return res.json({
-      notifications: rows.map((r) => ({
-        id: r.id,
-        type: r.type,
-        actorId: r.actor_id,
-        actorUsername: r.actor_username,
-        actorDisplayName: r.actor_display_name,
-        actorAvatarUrl: r.actor_avatar_url,
-        entityId: r.entity_id,
-        title: r.title,
-        body: r.body,
-        isRead: r.is_read === 1,
-        createdAt: r.created_at,
-      })),
-    });
+      return res.json({
+        notifications: rows.map((r) => ({
+          id: r.id,
+          type: r.type,
+          actorId: r.actorId,
+          actorUsername: r.actorUsername,
+          actorDisplayName: r.actorDisplayName,
+          actorAvatarUrl: r.actorAvatarUrl,
+          entityId: r.entityId,
+          title: r.title,
+          body: r.body,
+          isRead: r.isRead === 1,
+          createdAt: r.createdAt,
+        })),
+      });
+    } catch (error) {
+      console.error('list notifications error:', error);
+      return res.status(500).json({ error: 'Failed to load notifications.' });
+    }
   });
 
-  router.post('/read-all', requireAuth, (req: AuthedRequest, res) => {
-    db.prepare(`UPDATE notifications SET is_read = 1 WHERE user_id = ?`).run(req.userId!);
-    return res.json({ success: true });
+  router.post('/read-all', requireAuth, async (req: AuthedRequest, res) => {
+    try {
+      await database
+        .update(notifications)
+        .set({ isRead: 1 })
+        .where(eq(notifications.userId, req.userId!));
+      return res.json({ success: true });
+    } catch (error) {
+      console.error('read-all notifications error:', error);
+      return res.status(500).json({ error: 'Failed to mark notifications read.' });
+    }
   });
 
   return router;

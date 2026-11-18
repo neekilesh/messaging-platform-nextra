@@ -22,9 +22,35 @@ export interface PublicUser {
   fingerprint: string | null;
 }
 
+export type NexoraThemeId =
+  | 'cosmic-purple'
+  | 'mystic-blue'
+  | 'aurora-dream'
+  | 'dark-nebula'
+  | 'celestial-gold'
+  | 'custom-nebula';
+
+export interface CustomNebulaConfig {
+  primaryColor: string;
+  accentColor: string;
+  gradientStart: string;
+  gradientEnd: string;
+  baseColor: string;
+  angle: number;
+}
+
+export interface UserThemePreferences {
+  theme: NexoraThemeId;
+  customNebula: CustomNebulaConfig;
+  reduceEffects?: boolean;
+  soundEnabled?: boolean;
+  soundPack?: 'celestial' | 'deep-space' | 'minimal';
+}
+
 export interface AuthUser extends PublicUser {
   maskedEmail: string;
   createdAt: string;
+  themePreferences?: UserThemePreferences | null;
 }
 
 export interface EncryptedKeyBackup {

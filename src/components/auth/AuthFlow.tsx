@@ -14,6 +14,8 @@ import {
   Upload,
   User,
 } from 'lucide-react';
+import { signInWithPopup } from 'firebase/auth';
+import { auth, googleAuthProvider } from '../../lib/firebase';
 import { NexoraLogo } from '../ui/NexoraLogo';
 import { apiRequest, setStoredToken } from '../../lib/api';
 import {
@@ -26,7 +28,18 @@ import {
 } from '../../lib/crypto';
 import type { AuthUser, EncryptedKeyBackup } from '../../types/nexora';
 
-type AuthScreen = 'splash' | 'welcome' | 'login' | 'register_email' | 'register_otp' | 'register_profile' | 'forgot_email' | 'forgot_otp' | 'forgot_reset';
+type AuthScreen =
+  | 'splash'
+  | 'welcome'
+  | 'login'
+  | 'register_email'
+  | 'register_otp'
+  | 'register_profile'
+  | 'google_profile'
+  | 'google_unlock'
+  | 'forgot_email'
+  | 'forgot_otp'
+  | 'forgot_reset';
 
 interface AuthFlowProps {
   onAuthenticated: (user: AuthUser, keys: StoredLocalKeyBundle) => void;
@@ -63,6 +76,16 @@ export function AuthFlow({ onAuthenticated }: AuthFlowProps) {
 
   const [newPassword, setNewPassword] = useState('');
 
+  // Google Sign-In state
+  const [googleLoading, setGoogleLoading] = useState(false);
+  const [googleIdToken, setGoogleIdToken] = useState('');
+  const [googleEmail, setGoogleEmail] = useState('');
+  const [googleVaultUser, setGoogleVaultUser] = useState<{
+    user: AuthUser;
+    keyBackup: EncryptedKeyBackup;
+  } | null>(null);
+  const [googleVaultPassphrase, setGoogleVaultPassphrase] = useState('');
+
   useEffect(() => {
     if (screen === 'splash') {
       const t = setTimeout(() => setScreen('welcome'), 1400);
@@ -77,7 +100,7 @@ export function AuthFlow({ onAuthenticated }: AuthFlowProps) {
   }, [cooldownSec]);
 
   useEffect(() => {
-    if (screen !== 'register_profile') return;
+    if (screen !== 'register_profile' && screen !== 'google_profile') return;
     const clean = username.trim().replace(/^@+/, '');
     if (clean.length < 3) {
       setUsernameStatus({ checking: false, available: null });
@@ -276,6 +299,167 @@ export function AuthFlow({ onAuthenticated }: AuthFlowProps) {
     }
   };
 
+  const handleGoogleSignIn = async () => {
+    setError(null);
+    setInfoMsg(null);
+    setGoogleLoading(true);
+    try {
+      const cred = await signInWithPopup(auth, googleAuthProvider);
+      const idToken = await cred.user.getIdToken();
+
+      const res = await apiRequest<{
+        needsProfile: boolean;
+        email?: string;
+        suggestedName?: string;
+        avatarUrl?: string | null;
+        sessionToken?: string;
+        user?: AuthUser;
+        keyBackup?: EncryptedKeyBackup | null;
+      }>('/api/v1/auth/firebase', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${idToken}` },
+        body: JSON.stringify({
+          deviceName: navigator.userAgent.includes('Mobile') ? 'Mobile Browser' : 'Desktop Browser',
+          platform: navigator.platform || 'Web',
+        }),
+      });
+
+      if (res.needsProfile || !res.user || !res.sessionToken) {
+        setGoogleIdToken(idToken);
+        setGoogleEmail(res.email || cred.user.email || '');
+        setDisplayName(res.suggestedName || cred.user.displayName || '');
+        setAvatarUrl(res.avatarUrl ?? cred.user.photoURL ?? null);
+        setUsername('');
+        setPassword('');
+        setScreen('google_profile');
+        return;
+      }
+
+      setStoredToken(res.sessionToken);
+      const localKeys = await loadLocalKeyBundle(res.user.id);
+      if (localKeys) {
+        onAuthenticated(res.user, localKeys);
+        return;
+      }
+
+      if (res.keyBackup) {
+        setGoogleVaultUser({ user: res.user, keyBackup: res.keyBackup });
+        setGoogleVaultPassphrase('');
+        setScreen('google_unlock');
+        return;
+      }
+
+      const fresh = await generateIdentityKeyPair();
+      await apiRequest('/api/v1/users/me/keys', {
+        method: 'POST',
+        body: JSON.stringify({
+          ecdhPublicJwk: fresh.ecdhPublicJwk,
+          ecdsaPublicJwk: fresh.ecdsaPublicJwk,
+          fingerprint: fresh.fingerprint,
+        }),
+      });
+      const bundle: StoredLocalKeyBundle = { userId: res.user.id, ...fresh };
+      await saveLocalKeyBundle(bundle);
+      onAuthenticated(res.user, bundle);
+    } catch (err) {
+      const code = (err as { code?: string })?.code;
+      if (code !== 'auth/popup-closed-by-user' && code !== 'auth/cancelled-popup-request') {
+        setError(err instanceof Error ? err.message : 'Google sign-in failed.');
+      }
+    } finally {
+      setGoogleLoading(false);
+    }
+  };
+
+  const completeGoogleProfile = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setError(null);
+    if (password.length < 8) {
+      setError('Encryption vault passphrase must be at least 8 characters.');
+      return;
+    }
+    setLoading(true);
+    try {
+      const rawKeys = await generateIdentityKeyPair();
+      const backup = await createEncryptedKeyBackup(rawKeys, password);
+
+      const res = await apiRequest<{
+        needsProfile: boolean;
+        sessionToken: string;
+        user: AuthUser;
+      }>('/api/v1/auth/firebase', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${googleIdToken}` },
+        body: JSON.stringify({
+          username: username.trim().replace(/^@+/, ''),
+          displayName: displayName.trim(),
+          avatarUrl,
+          deviceName: navigator.userAgent.includes('Mobile') ? 'Mobile Browser' : 'Desktop Browser',
+          platform: navigator.platform || 'Web',
+          keys: backup,
+        }),
+      });
+
+      const fullBundle: StoredLocalKeyBundle = {
+        userId: res.user.id,
+        ...rawKeys,
+      };
+      await saveLocalKeyBundle(fullBundle);
+      setStoredToken(res.sessionToken);
+      onAuthenticated(res.user, fullBundle);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not complete Google onboarding.');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleUnlockGoogleVault = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!googleVaultUser) return;
+    setError(null);
+    setLoading(true);
+    try {
+      const restored = await restoreEncryptedKeyBackup(
+        googleVaultUser.user.id,
+        googleVaultPassphrase,
+        googleVaultUser.keyBackup
+      );
+      onAuthenticated(googleVaultUser.user, restored);
+    } catch {
+      setError('Incorrect vault passphrase. You can try again or generate fresh keys for this device.');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleResetGoogleDeviceKeys = async () => {
+    if (!googleVaultUser) return;
+    setError(null);
+    setLoading(true);
+    try {
+      const fresh = await generateIdentityKeyPair();
+      const backup = googleVaultPassphrase.length >= 8
+        ? await createEncryptedKeyBackup(fresh, googleVaultPassphrase)
+        : {
+            ecdhPublicJwk: fresh.ecdhPublicJwk,
+            ecdsaPublicJwk: fresh.ecdsaPublicJwk,
+            fingerprint: fresh.fingerprint,
+          };
+      await apiRequest('/api/v1/users/me/keys', {
+        method: 'POST',
+        body: JSON.stringify(backup),
+      });
+      const bundle: StoredLocalKeyBundle = { userId: googleVaultUser.user.id, ...fresh };
+      await saveLocalKeyBundle(bundle);
+      onAuthenticated(googleVaultUser.user, bundle);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to initialize device keys.');
+    } finally {
+      setLoading(false);
+    }
+  };
+
   const passwordScore = [
     password.length >= 8,
     /[A-Z]/.test(password),
@@ -367,6 +551,23 @@ export function AuthFlow({ onAuthenticated }: AuthFlowProps) {
                 >
                   Sign In
                 </button>
+                <div className="relative py-1">
+                  <div className="absolute inset-0 flex items-center">
+                    <div className="w-full border-t border-white/10" />
+                  </div>
+                  <div className="relative flex justify-center text-[11px] uppercase tracking-wider">
+                    <span className="bg-slate-950/90 px-2.5 text-slate-500">or</span>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  disabled={googleLoading}
+                  onClick={handleGoogleSignIn}
+                  className="w-full h-12 rounded-xl bg-white/95 hover:bg-white disabled:opacity-60 text-slate-900 font-medium text-sm flex items-center justify-center gap-2.5 transition-colors cursor-pointer"
+                >
+                  <GoogleIcon />
+                  <span>{googleLoading ? 'Connecting Google...' : 'Continue with Google'}</span>
+                </button>
               </div>
 
               <div className="pt-4 border-t border-white/10 grid grid-cols-2 gap-4 text-xs text-slate-400">
@@ -398,8 +599,14 @@ export function AuthFlow({ onAuthenticated }: AuthFlowProps) {
                 onClick={() => {
                   setError(null);
                   setInfoMsg(null);
-                  if (screen === 'login' || screen === 'register_email') setScreen('welcome');
-                  else if (screen === 'register_otp') setScreen('register_email');
+                  if (
+                    screen === 'login' ||
+                    screen === 'register_email' ||
+                    screen === 'google_profile' ||
+                    screen === 'google_unlock'
+                  ) {
+                    setScreen('welcome');
+                  } else if (screen === 'register_otp') setScreen('register_email');
                   else if (screen === 'register_profile') setScreen('register_otp');
                   else if (screen === 'forgot_email') setScreen('login');
                   else if (screen === 'forgot_otp') setScreen('forgot_email');
@@ -489,6 +696,25 @@ export function AuthFlow({ onAuthenticated }: AuthFlowProps) {
                 >
                   {loading ? 'Unlocking Encrypted Vault...' : 'Sign In'}
                 </button>
+
+                <div className="relative py-1">
+                  <div className="absolute inset-0 flex items-center">
+                    <div className="w-full border-t border-white/10" />
+                  </div>
+                  <div className="relative flex justify-center text-[11px] uppercase tracking-wider">
+                    <span className="bg-slate-950/90 px-2.5 text-slate-500">or</span>
+                  </div>
+                </div>
+
+                <button
+                  type="button"
+                  disabled={googleLoading}
+                  onClick={handleGoogleSignIn}
+                  className="w-full h-11 rounded-xl bg-white/95 hover:bg-white disabled:opacity-60 text-slate-900 font-medium text-sm flex items-center justify-center gap-2.5 transition-colors cursor-pointer"
+                >
+                  <GoogleIcon />
+                  <span>{googleLoading ? 'Connecting Google...' : 'Continue with Google'}</span>
+                </button>
               </form>
             )}
 
@@ -528,6 +754,25 @@ export function AuthFlow({ onAuthenticated }: AuthFlowProps) {
                   className="w-full h-11 rounded-xl bg-violet-600 hover:bg-violet-500 disabled:opacity-50 text-white font-medium text-sm transition-colors cursor-pointer"
                 >
                   {loading ? 'Sending Code...' : 'Send Verification Code'}
+                </button>
+
+                <div className="relative py-1">
+                  <div className="absolute inset-0 flex items-center">
+                    <div className="w-full border-t border-white/10" />
+                  </div>
+                  <div className="relative flex justify-center text-[11px] uppercase tracking-wider">
+                    <span className="bg-slate-950/90 px-2.5 text-slate-500">instant option</span>
+                  </div>
+                </div>
+
+                <button
+                  type="button"
+                  disabled={googleLoading}
+                  onClick={handleGoogleSignIn}
+                  className="w-full h-11 rounded-xl bg-white/95 hover:bg-white disabled:opacity-60 text-slate-900 font-medium text-sm flex items-center justify-center gap-2.5 transition-colors cursor-pointer"
+                >
+                  <GoogleIcon />
+                  <span>{googleLoading ? 'Connecting Google...' : 'Continue with Google'}</span>
                 </button>
               </form>
             )}
@@ -743,6 +988,147 @@ export function AuthFlow({ onAuthenticated }: AuthFlowProps) {
               </form>
             )}
 
+            {screen === 'google_profile' && (
+              <form onSubmit={completeGoogleProfile} className="space-y-4">
+                <div>
+                  <h2 className="text-2xl font-display font-bold text-white">Claim your @username</h2>
+                  <p className="text-sm text-slate-400 mt-1">
+                    Verified with Google ({googleEmail}). Pick your handle and an encryption vault passphrase.
+                  </p>
+                </div>
+
+                <div className="flex items-center gap-4">
+                  <label className="relative cursor-pointer group shrink-0">
+                    {avatarUrl ? (
+                      <img
+                        src={avatarUrl}
+                        alt="Profile preview"
+                        className="w-16 h-16 rounded-full object-cover border border-violet-400/40"
+                      />
+                    ) : (
+                      <div className="w-16 h-16 rounded-full bg-slate-900/90 border border-dashed border-slate-600 flex items-center justify-center text-slate-400 group-hover:border-violet-400 transition-colors">
+                        <Upload className="w-5 h-5" />
+                      </div>
+                    )}
+                    <input type="file" accept="image/*" onChange={handleAvatarUpload} className="hidden" />
+                  </label>
+                  <div className="text-xs text-slate-400">
+                    <div className="text-slate-200 font-medium">Profile Avatar</div>
+                    <div>Click to customize your profile photo.</div>
+                  </div>
+                </div>
+
+                <div className="space-y-1.5">
+                  <label className="text-xs font-medium text-slate-300">Unique Username</label>
+                  <div className="relative">
+                    <AtSign className="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
+                    <input
+                      type="text"
+                      required
+                      value={username}
+                      onChange={(e) => setUsername(e.target.value.replace(/[^a-zA-Z0-9_]/g, ''))}
+                      placeholder="ShadowKing"
+                      className="w-full h-11 pl-10 pr-4 rounded-xl bg-slate-900/80 border border-white/10 text-sm text-white placeholder:text-slate-500 focus:outline-none focus:border-violet-500"
+                    />
+                  </div>
+                  <div className="text-xs min-h-[16px]">
+                    {usernameStatus.checking && <span className="text-slate-400">Checking availability...</span>}
+                    {!usernameStatus.checking && usernameStatus.available === true && (
+                      <span className="text-cyan-300 inline-flex items-center gap-1">
+                        <CheckCircle2 className="w-3.5 h-3.5" /> @{username} is available
+                      </span>
+                    )}
+                    {!usernameStatus.checking && usernameStatus.available === false && (
+                      <span className="text-rose-300">{usernameStatus.reason || 'Username unavailable'}</span>
+                    )}
+                  </div>
+                </div>
+
+                <div className="space-y-1.5">
+                  <label className="text-xs font-medium text-slate-300">Display Name</label>
+                  <input
+                    type="text"
+                    required
+                    value={displayName}
+                    onChange={(e) => setDisplayName(e.target.value)}
+                    placeholder="Alex Mercer"
+                    className="w-full h-11 px-4 rounded-xl bg-slate-900/80 border border-white/10 text-sm text-white placeholder:text-slate-500 focus:outline-none focus:border-violet-500"
+                  />
+                </div>
+
+                <div className="space-y-1.5">
+                  <label className="text-xs font-medium text-slate-300">Encryption Vault Passphrase</label>
+                  <div className="relative">
+                    <input
+                      type={showRegPw ? 'text' : 'password'}
+                      required
+                      minLength={8}
+                      value={password}
+                      onChange={(e) => setPassword(e.target.value)}
+                      placeholder="Min 8 chars to protect E2EE key backup"
+                      className="w-full h-11 pl-4 pr-11 rounded-xl bg-slate-900/80 border border-white/10 text-sm text-white placeholder:text-slate-500 focus:outline-none focus:border-violet-500"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setShowRegPw((v) => !v)}
+                      aria-label={showRegPw ? 'Hide passphrase' : 'Show passphrase'}
+                      className="absolute right-2 top-1/2 -translate-y-1/2 p-2 text-slate-400 hover:text-white cursor-pointer"
+                    >
+                      {showRegPw ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                    </button>
+                  </div>
+                </div>
+
+                <button
+                  type="submit"
+                  disabled={loading || usernameStatus.available === false}
+                  className="w-full h-11 rounded-xl bg-violet-600 hover:bg-violet-500 disabled:opacity-50 text-white font-medium text-sm transition-colors cursor-pointer"
+                >
+                  {loading ? 'Generating E2EE Keys...' : 'Enter NEXORA'}
+                </button>
+              </form>
+            )}
+
+            {screen === 'google_unlock' && googleVaultUser && (
+              <form onSubmit={handleUnlockGoogleVault} className="space-y-4">
+                <div>
+                  <h2 className="text-2xl font-display font-bold text-white">Unlock Key Vault</h2>
+                  <p className="text-sm text-slate-400 mt-1">
+                    Welcome back, <span className="text-slate-200">@{googleVaultUser.user.username}</span>. Enter your encryption vault passphrase to restore your E2EE keys on this device.
+                  </p>
+                </div>
+
+                <div className="space-y-1.5">
+                  <label className="text-xs font-medium text-slate-300">Vault Passphrase</label>
+                  <input
+                    type="password"
+                    required
+                    value={googleVaultPassphrase}
+                    onChange={(e) => setGoogleVaultPassphrase(e.target.value)}
+                    placeholder="Enter your vault passphrase"
+                    className="w-full h-11 px-4 rounded-xl bg-slate-900/80 border border-white/10 text-sm text-white placeholder:text-slate-500 focus:outline-none focus:border-violet-500"
+                  />
+                </div>
+
+                <button
+                  type="submit"
+                  disabled={loading}
+                  className="w-full h-11 rounded-xl bg-violet-600 hover:bg-violet-500 disabled:opacity-50 text-white font-medium text-sm transition-colors cursor-pointer"
+                >
+                  {loading ? 'Decrypting Keys...' : 'Restore Encrypted Vault'}
+                </button>
+
+                <button
+                  type="button"
+                  disabled={loading}
+                  onClick={handleResetGoogleDeviceKeys}
+                  className="w-full h-10 rounded-xl bg-slate-800/70 hover:bg-slate-800 text-slate-300 border border-white/10 text-xs transition-colors cursor-pointer"
+                >
+                  Forgot passphrase? Generate fresh keys for this device
+                </button>
+              </form>
+            )}
+
             {screen === 'forgot_reset' && (
               <form onSubmit={handleResetPassword} className="space-y-4">
                 <div>
@@ -777,5 +1163,28 @@ export function AuthFlow({ onAuthenticated }: AuthFlowProps) {
         )}
       </AnimatePresence>
     </div>
+  );
+}
+
+function GoogleIcon() {
+  return (
+    <svg className="w-4 h-4 shrink-0" viewBox="0 0 24 24" aria-hidden="true">
+      <path
+        fill="#4285F4"
+        d="M23.745 12.27c0-.7-.06-1.4-.19-2.07H12v4.51h6.6c-.29 1.52-1.14 2.82-2.4 3.68v3.05h3.88c2.27-2.09 3.665-5.17 3.665-9.17Z"
+      />
+      <path
+        fill="#34A853"
+        d="M12 24c3.3 0 6.08-1.09 8.1-2.96l-3.88-3.05c-1.08.73-2.46 1.16-4.22 1.16-3.24 0-5.99-2.19-6.97-5.14H1.02v3.14C3.03 21.14 7.19 24 12 24Z"
+      />
+      <path
+        fill="#FBBC05"
+        d="M5.03 14.01A7.18 7.18 0 0 1 4.65 12c0-.7.13-1.38.38-2.01V6.85H1.02A11.98 11.98 0 0 0 0 12c0 1.94.46 3.77 1.02 5.15l4.01-3.14Z"
+      />
+      <path
+        fill="#EA4335"
+        d="M12 4.75c1.8 0 3.41.62 4.68 1.83l3.51-3.51C18.07 1.19 15.3 0 12 0 7.19 0 3.03 2.86 1.02 6.85l4.01 3.14c.98-2.95 3.73-5.24 6.97-5.24Z"
+      />
+    </svg>
   );
 }
