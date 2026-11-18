@@ -2,6 +2,8 @@ import React, { useEffect, useState } from 'react';
 import {
   Ban,
   Check,
+  Copy,
+  KeyRound,
   Laptop,
   Lock,
   LogOut,
@@ -60,8 +62,17 @@ export function SettingsPanel({ user, myKeys, onUserUpdated, onLogout }: Setting
 
   const [blocked, setBlocked] = useState<Array<{ user: PublicUser; blockedAt: string }>>([]);
   const [devices, setDevices] = useState<DeviceSession[]>([]);
+  const [copiedAccessKey, setCopiedAccessKey] = useState(false);
   const [feedback, setFeedback] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+
+  const savedAccessKey = (() => {
+    try {
+      return localStorage.getItem(`nexora_access_key_${user.id}`);
+    } catch {
+      return null;
+    }
+  })();
 
   useEffect(() => {
     apiRequest<{ privacy: PrivacySettings }>('/api/v1/users/me/privacy')
@@ -206,9 +217,9 @@ export function SettingsPanel({ user, myKeys, onUserUpdated, onLogout }: Setting
                 <input type="file" accept="image/*" onChange={handleAvatarUpload} className="hidden" />
               </label>
               <div className="text-xs text-slate-400">
-                {user.maskedEmail === 'NEXORA ID'
-                  ? `NEXORA ID: @${user.username}`
-                  : `Private Account: ${user.maskedEmail}`}
+                {user.maskedEmail === 'Instant Pass' || user.maskedEmail === 'NEXORA ID'
+                  ? `Instant Device Pass: @${user.username}`
+                  : `Google Account: ${user.maskedEmail}`}
               </div>
             </div>
           </div>
@@ -525,6 +536,33 @@ export function SettingsPanel({ user, myKeys, onUserUpdated, onLogout }: Setting
             <div className="text-xs text-slate-400">Your Public Key Fingerprint</div>
             <div className="font-mono-tabular text-base text-cyan-300">{myKeys.fingerprint}</div>
           </div>
+
+          {savedAccessKey && (
+            <div className="rounded-xl bg-slate-950/75 border border-violet-500/25 p-4 space-y-2">
+              <div className="flex items-center justify-between gap-2">
+                <div className="flex items-center gap-1.5 text-xs font-medium text-slate-200">
+                  <KeyRound className="w-3.5 h-3.5 text-violet-300" />
+                  <span>Instant Pass Recovery Access Key</span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    navigator.clipboard?.writeText(savedAccessKey).catch(() => {});
+                    setCopiedAccessKey(true);
+                    setTimeout(() => setCopiedAccessKey(false), 1800);
+                  }}
+                  className="h-7 px-2.5 rounded-lg bg-white/10 hover:bg-white/15 text-[11px] text-slate-200 inline-flex items-center gap-1 cursor-pointer"
+                >
+                  {copiedAccessKey ? <Check className="w-3 h-3 text-cyan-300" /> : <Copy className="w-3 h-3" />}
+                  <span>{copiedAccessKey ? 'Copied' : 'Copy'}</span>
+                </button>
+              </div>
+              <div className="font-mono-tabular text-xs text-violet-200 break-all">{savedAccessKey}</div>
+              <p className="text-[11px] text-slate-400">
+                Save this key to reconnect to @{user.username} from another browser without creating an account.
+              </p>
+            </div>
+          )}
 
           <div className="rounded-xl bg-amber-500/10 border border-amber-500/25 p-4 text-xs text-amber-100/90 space-y-1">
             <div className="font-semibold">Disappearing Messages & Media Notice</div>

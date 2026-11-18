@@ -125,15 +125,11 @@ describe('NEXORA Full-Stack Integration & Security Suite', () => {
     return { status: res.status, data };
   }
 
-  async function registerUser(_email: string, username: string, password = 'StrongPass123') {
-    const uniqueUsername = `${username}_${runTag}`;
+  async function registerUser(_email: string, _username: string) {
     const keys = await generateTestKeyBundle();
-    const reg = await api('/api/v1/auth/register', {
+    const reg = await api('/api/v1/auth/instant', {
       method: 'POST',
       body: JSON.stringify({
-        username: uniqueUsername,
-        displayName: uniqueUsername,
-        password,
         keys: {
           ecdhPublicJwk: keys.ecdhPublicJwk,
           ecdsaPublicJwk: keys.ecdsaPublicJwk,
@@ -143,20 +139,28 @@ describe('NEXORA Full-Stack Integration & Security Suite', () => {
     });
     assert.equal(reg.status, 201);
     createdUserIds.push(reg.data.user.id);
-    return { token: reg.data.sessionToken as string, user: reg.data.user, keys };
+    return {
+      token: reg.data.sessionToken as string,
+      accessKey: reg.data.accessKey as string,
+      user: reg.data.user,
+      keys,
+    };
   }
 
-  test('Auth: Direct ID creation, weak password rejection, duplicate username rejection, and login', async () => {
-    const handle = `ShadowKing_${runTag}`;
+  test('Auth: Zero-form Instant Device Pass, auto-handle uniqueness, and Access Key restore', async () => {
     const aliceKeys = await generateTestKeyBundle();
 
-    // Reject weak password
-    const weakReg = await api('/api/v1/auth/register', {
+    // Missing E2EE keys rejected
+    const missingKeys = await api('/api/v1/auth/instant', {
+      method: 'POST',
+      body: JSON.stringify({}),
+    });
+    assert.equal(missingKeys.status, 400);
+
+    // 1-click Instant Device Pass succeeds with auto-generated handle + Access Key
+    const instantRes = await api('/api/v1/auth/instant', {
       method: 'POST',
       body: JSON.stringify({
-        username: handle,
-        displayName: 'Shadow King',
-        password: 'weak',
         keys: {
           ecdhPublicJwk: aliceKeys.ecdhPublicJwk,
           ecdsaPublicJwk: aliceKeys.ecdsaPublicJwk,
@@ -164,43 +168,33 @@ describe('NEXORA Full-Stack Integration & Security Suite', () => {
         },
       }),
     });
-    assert.equal(weakReg.status, 400);
+    assert.equal(instantRes.status, 201);
+    assert.ok(instantRes.data.sessionToken);
+    assert.ok(instantRes.data.accessKey?.startsWith('nxk_'));
+    assert.ok(instantRes.data.user?.username);
+    createdUserIds.push(instantRes.data.user.id);
 
-    // Direct ID registration succeeds
-    const reg = await api('/api/v1/auth/register', {
-      method: 'POST',
-      body: JSON.stringify({
-        username: handle,
-        displayName: 'Shadow King',
-        password: 'Password123',
-        keys: {
-          ecdhPublicJwk: aliceKeys.ecdhPublicJwk,
-          ecdsaPublicJwk: aliceKeys.ecdsaPublicJwk,
-          fingerprint: aliceKeys.fingerprint,
-        },
-      }),
-    });
-    assert.equal(reg.status, 201);
-    createdUserIds.push(reg.data.user.id);
-
-    // Reject duplicate username (case-insensitive)
-    const dupCheck = await api(`/api/v1/auth/check-username?username=${handle.toLowerCase()}`);
+    // Auto-generated handle is marked taken in availability check
+    const dupCheck = await api(
+      `/api/v1/auth/check-username?username=${instantRes.data.user.username.toLowerCase()}`
+    );
     assert.equal(dupCheck.data.available, false);
 
-    // Reject wrong password
-    const badLogin = await api('/api/v1/auth/login', {
+    // Reject unrecognized Access Key
+    const badKey = await api('/api/v1/auth/access-key', {
       method: 'POST',
-      body: JSON.stringify({ identifier: handle, password: 'WrongPassword1' }),
+      body: JSON.stringify({ accessKey: 'nxk_invalid000000000000' }),
     });
-    assert.equal(badLogin.status, 401);
+    assert.equal(badKey.status, 401);
 
-    // Login succeeds
-    const goodLogin = await api('/api/v1/auth/login', {
+    // Restore session using issued Access Key succeeds
+    const goodRestore = await api('/api/v1/auth/access-key', {
       method: 'POST',
-      body: JSON.stringify({ identifier: `@${handle}`, password: 'Password123' }),
+      body: JSON.stringify({ accessKey: instantRes.data.accessKey }),
     });
-    assert.equal(goodLogin.status, 200);
-    assert.ok(goodLogin.data.sessionToken);
+    assert.equal(goodRestore.status, 200);
+    assert.ok(goodRestore.data.sessionToken);
+    assert.equal(goodRestore.data.user.id, instantRes.data.user.id);
   });
 
   test('Private E2EE Messaging: real ciphertext storage, recipient decryption, and 403 isolation', async () => {

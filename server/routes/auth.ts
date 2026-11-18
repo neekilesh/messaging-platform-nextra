@@ -14,17 +14,15 @@ import {
   createRateLimiter,
   generateSessionToken,
   hashEmail,
-  hashPassword,
   hashSessionToken,
   maskEmail,
-  validatePasswordStrength,
   validateUsernameFormat,
-  verifyPassword,
 } from '../security.ts';
 import { createRequireAuth, getPublicUserById } from '../context.ts';
 import type { AuthedRequest } from '../context.ts';
 
 const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+const COSMIC_NAMES = ['Nova', 'Orion', 'Lyra', 'Vega', 'Nebula', 'Atlas', 'Pulse', 'Comet', 'Zenith', 'Aurora'];
 
 function isHttpsRequest(req: { secure?: boolean; headers: Record<string, string | string[] | undefined> }) {
   return Boolean(req.secure || req.headers['x-forwarded-proto'] === 'https');
@@ -45,12 +43,38 @@ function setSessionCookie(
   });
 }
 
+async function generateUniqueHandle(database: PgDatabase, rawSeed: string): Promise<string> {
+  const cleaned = rawSeed.replace(/[^a-zA-Z0-9_]/g, '');
+  let base = cleaned.slice(0, 16);
+  if (base.length < 3 || ['admin', 'root', 'system', 'nexora', 'support', 'security', 'null', 'undefined'].includes(base.toLowerCase())) {
+    base = `Explorer_${crypto.randomBytes(2).toString('hex')}`;
+  }
+
+  for (let attempt = 0; attempt < 12; attempt++) {
+    const candidate =
+      attempt === 0
+        ? base
+        : `${base.slice(0, 17)}_${crypto.randomBytes(2).toString('hex')}`;
+    const check = validateUsernameFormat(candidate);
+    if (!check.valid) continue;
+    const existing = await database
+      .select({ id: users.id })
+      .from(users)
+      .where(eq(users.usernameNormalized, check.normalized))
+      .limit(1);
+    if (existing.length === 0) {
+      return candidate;
+    }
+  }
+  return `User_${crypto.randomBytes(4).toString('hex')}`;
+}
+
 export function createAuthRouter(database: PgDatabase) {
   const router = Router();
   const requireAuth = createRequireAuth(database);
 
-  const registerLimiter = createRateLimiter({ windowMs: 60_000, max: 15, keyPrefix: 'register' });
-  const loginLimiter = createRateLimiter({ windowMs: 60_000, max: 15, keyPrefix: 'login' });
+  const instantLimiter = createRateLimiter({ windowMs: 60_000, max: 20, keyPrefix: 'instant' });
+  const loginLimiter = createRateLimiter({ windowMs: 60_000, max: 20, keyPrefix: 'login' });
 
   router.get('/check-username', async (req, res) => {
     try {
@@ -113,6 +137,17 @@ export function createAuthRouter(database: PgDatabase) {
         }
       }
 
+      const keys = req.body?.keys as
+        | {
+            ecdhPublicJwk?: string;
+            ecdsaPublicJwk?: string;
+            fingerprint?: string;
+            encryptedPrivateKey?: string;
+            salt?: string;
+            iv?: string;
+          }
+        | undefined;
+
       const existingUser = existingRows[0];
       if (existingUser) {
         const deviceId = crypto.randomUUID();
@@ -150,11 +185,26 @@ export function createAuthRouter(database: PgDatabase) {
           .limit(1);
         const keyBackup = keyRows[0];
 
+        if (!keyBackup && keys?.ecdhPublicJwk && keys?.ecdsaPublicJwk && keys?.fingerprint) {
+          await database.insert(identityKeys).values({
+            id: crypto.randomUUID(),
+            userId: existingUser.id,
+            deviceId,
+            ecdhPublicJwk: keys.ecdhPublicJwk,
+            ecdsaPublicJwk: keys.ecdsaPublicJwk,
+            encryptedKeyBackup: keys.encryptedPrivateKey || null,
+            backupSalt: keys.salt || null,
+            backupIv: keys.iv || null,
+            fingerprint: keys.fingerprint,
+            createdAt: nowIso,
+            updatedAt: nowIso,
+          });
+        }
+
         setSessionCookie(req, res, rawSessionToken);
 
         const publicUser = await getPublicUserById(database, existingUser.id, existingUser.id);
         return res.json({
-          needsProfile: false,
           sessionToken: rawSessionToken,
           user: {
             ...publicUser,
@@ -175,46 +225,13 @@ export function createAuthRouter(database: PgDatabase) {
         });
       }
 
-      const usernameRaw =
-        typeof req.body?.username === 'string' ? req.body.username.trim().replace(/^@+/, '') : '';
-      const displayName =
-        typeof req.body?.displayName === 'string' ? req.body.displayName.trim() : '';
-      const keys = req.body?.keys as
-        | {
-            ecdhPublicJwk?: string;
-            ecdsaPublicJwk?: string;
-            fingerprint?: string;
-            encryptedPrivateKey?: string;
-            salt?: string;
-            iv?: string;
-          }
-        | undefined;
-
-      if (!usernameRaw || !displayName || !keys?.ecdhPublicJwk || !keys?.ecdsaPublicJwk || !keys?.fingerprint) {
-        return res.json({
-          needsProfile: true,
-          email: emailRaw,
-          suggestedName: decoded.name || emailRaw.split('@')[0] || 'Explorer',
-          avatarUrl: decoded.picture || null,
-        });
+      if (!keys?.ecdhPublicJwk || !keys?.ecdsaPublicJwk || !keys?.fingerprint) {
+        return res.status(400).json({ error: 'Device encryption keys are required.' });
       }
 
-      const usernameCheck = validateUsernameFormat(usernameRaw);
-      if (!usernameCheck.valid) {
-        return res.status(400).json({ error: usernameCheck.reason });
-      }
-      if (displayName.length < 1 || displayName.length > 50) {
-        return res.status(400).json({ error: 'Display name must be 1 to 50 characters.' });
-      }
-
-      const conflict = await database
-        .select({ id: users.id })
-        .from(users)
-        .where(eq(users.usernameNormalized, usernameCheck.normalized))
-        .limit(1);
-      if (conflict.length > 0) {
-        return res.status(409).json({ error: 'Username is already taken.' });
-      }
+      const rawSeed = (decoded.name || emailRaw.split('@')[0] || 'Explorer').trim();
+      const autoUsername = await generateUniqueHandle(database, rawSeed);
+      const displayName = (decoded.name || autoUsername).trim().slice(0, 50);
 
       const userId = crypto.randomUUID();
       const deviceId = crypto.randomUUID();
@@ -224,17 +241,14 @@ export function createAuthRouter(database: PgDatabase) {
       const nowIso = new Date().toISOString();
       const sessionExpiresAt = new Date(Date.now() + SESSION_TTL_MS).toISOString();
       const masked = maskEmail(emailRaw);
-      const avatarUrl =
-        typeof req.body?.avatarUrl === 'string'
-          ? req.body.avatarUrl
-          : decoded.picture || null;
+      const avatarUrl = decoded.picture || null;
 
       await database.transaction(async (tx) => {
         await tx.insert(users).values({
           id: userId,
           uid: decoded.uid,
-          username: usernameRaw,
-          usernameNormalized: usernameCheck.normalized,
+          username: autoUsername,
+          usernameNormalized: autoUsername.toLowerCase(),
           displayName,
           emailHash: emailH,
           emailMasked: masked,
@@ -297,7 +311,6 @@ export function createAuthRouter(database: PgDatabase) {
 
       const user = await getPublicUserById(database, userId, userId);
       return res.status(201).json({
-        needsProfile: false,
         sessionToken: rawSessionToken,
         user: { ...user, maskedEmail: masked, createdAt: nowIso },
       });
@@ -307,12 +320,8 @@ export function createAuthRouter(database: PgDatabase) {
     }
   });
 
-  router.post('/register', registerLimiter, async (req, res) => {
+  router.post('/instant', instantLimiter, async (req, res) => {
     try {
-      const usernameRaw = typeof req.body?.username === 'string' ? req.body.username.trim().replace(/^@+/, '') : '';
-      const displayName = typeof req.body?.displayName === 'string' ? req.body.displayName.trim() : '';
-      const password = typeof req.body?.password === 'string' ? req.body.password : '';
-      const avatarUrl = typeof req.body?.avatarUrl === 'string' ? req.body.avatarUrl : null;
       const deviceName = typeof req.body?.deviceName === 'string' ? req.body.deviceName.slice(0, 80) : 'Web Browser';
       const platform = typeof req.body?.platform === 'string' ? req.body.platform.slice(0, 40) : 'Web';
       const keys = req.body?.keys as
@@ -320,57 +329,40 @@ export function createAuthRouter(database: PgDatabase) {
             ecdhPublicJwk?: string;
             ecdsaPublicJwk?: string;
             fingerprint?: string;
-            encryptedPrivateKey?: string;
-            salt?: string;
-            iv?: string;
           }
         | undefined;
 
-      const usernameCheck = validateUsernameFormat(usernameRaw);
-      if (!usernameCheck.valid) {
-        return res.status(400).json({ error: usernameCheck.reason });
-      }
-      if (displayName.length < 1 || displayName.length > 50) {
-        return res.status(400).json({ error: 'Display name must be 1 to 50 characters.' });
-      }
-      const pwCheck = validatePasswordStrength(password);
-      if (!pwCheck.valid) {
-        return res.status(400).json({ error: pwCheck.reason });
-      }
       if (!keys?.ecdhPublicJwk || !keys?.ecdsaPublicJwk || !keys?.fingerprint) {
-        return res.status(400).json({ error: 'End-to-end encryption public keys are required.' });
+        return res.status(400).json({ error: 'Device encryption keys are required.' });
       }
 
-      const existingUsername = await database
-        .select({ id: users.id })
-        .from(users)
-        .where(eq(users.usernameNormalized, usernameCheck.normalized))
-        .limit(1);
-      if (existingUsername.length > 0) {
-        return res.status(409).json({ error: 'Username is already taken.' });
-      }
+      const word = COSMIC_NAMES[crypto.randomInt(0, COSMIC_NAMES.length)];
+      const tag = crypto.randomBytes(2).toString('hex');
+      const autoUsername = await generateUniqueHandle(database, `${word}_${tag}`);
+      const displayName = `${word} ${tag.toUpperCase()}`;
 
-      const passwordHash = await hashPassword(password);
       const userId = crypto.randomUUID();
       const deviceId = crypto.randomUUID();
       const sessionId = crypto.randomUUID();
       const rawSessionToken = generateSessionToken();
       const sessionTokenHash = hashSessionToken(rawSessionToken);
+      const accessKey = `nxk_${crypto.randomBytes(16).toString('hex')}`;
+      const accessKeyHash = hashSessionToken(accessKey);
       const nowIso = new Date().toISOString();
       const sessionExpiresAt = new Date(Date.now() + SESSION_TTL_MS).toISOString();
-      const emailH = hashEmail(`${usernameCheck.normalized}.${userId}@id.nexora.local`);
-      const masked = 'NEXORA ID';
+      const emailH = hashEmail(`${autoUsername.toLowerCase()}.${userId}@instant.nexora.local`);
+      const masked = 'Instant Pass';
 
       await database.transaction(async (tx) => {
         await tx.insert(users).values({
           id: userId,
-          username: usernameRaw,
-          usernameNormalized: usernameCheck.normalized,
+          username: autoUsername,
+          usernameNormalized: autoUsername.toLowerCase(),
           displayName,
           emailHash: emailH,
           emailMasked: masked,
-          passwordHash,
-          avatarUrl,
+          passwordHash: accessKeyHash,
+          avatarUrl: null,
           bio: '',
           statusText: 'Encrypted on NEXORA',
           lastSeenAt: nowIso,
@@ -415,9 +407,9 @@ export function createAuthRouter(database: PgDatabase) {
           deviceId,
           ecdhPublicJwk: keys.ecdhPublicJwk!,
           ecdsaPublicJwk: keys.ecdsaPublicJwk!,
-          encryptedKeyBackup: keys.encryptedPrivateKey || null,
-          backupSalt: keys.salt || null,
-          backupIv: keys.iv || null,
+          encryptedKeyBackup: null,
+          backupSalt: null,
+          backupIv: null,
           fingerprint: keys.fingerprint!,
           createdAt: nowIso,
           updatedAt: nowIso,
@@ -429,56 +421,39 @@ export function createAuthRouter(database: PgDatabase) {
       const user = await getPublicUserById(database, userId, userId);
       return res.status(201).json({
         sessionToken: rawSessionToken,
+        accessKey,
         user: { ...user, maskedEmail: masked, createdAt: nowIso },
       });
     } catch (error) {
-      console.error('register error:', error);
-      return res.status(500).json({ error: 'Account registration failed.' });
+      console.error('instant pass error:', error);
+      return res.status(500).json({ error: 'Could not start instant session.' });
     }
   });
 
-  router.post('/login', loginLimiter, async (req, res) => {
+  router.post('/access-key', loginLimiter, async (req, res) => {
     try {
-      const identifierRaw = typeof req.body?.identifier === 'string' ? req.body.identifier.trim() : '';
-      const password = typeof req.body?.password === 'string' ? req.body.password : '';
+      const accessKey = typeof req.body?.accessKey === 'string' ? req.body.accessKey.trim() : '';
       const deviceName = typeof req.body?.deviceName === 'string' ? req.body.deviceName.slice(0, 80) : 'Web Browser';
       const platform = typeof req.body?.platform === 'string' ? req.body.platform.slice(0, 40) : 'Web';
 
-      if (!identifierRaw || !password) {
-        return res.status(400).json({ error: 'Username or email and password are required.' });
+      if (!accessKey.startsWith('nxk_')) {
+        return res.status(400).json({ error: 'Invalid Access Key format.' });
       }
 
-      const userRows =
-        identifierRaw.includes('@') && !identifierRaw.startsWith('@')
-          ? await database
-              .select({
-                id: users.id,
-                passwordHash: users.passwordHash,
-                emailMasked: users.emailMasked,
-                createdAt: users.createdAt,
-              })
-              .from(users)
-              .where(eq(users.emailHash, hashEmail(identifierRaw.toLowerCase())))
-              .limit(1)
-          : await database
-              .select({
-                id: users.id,
-                passwordHash: users.passwordHash,
-                emailMasked: users.emailMasked,
-                createdAt: users.createdAt,
-              })
-              .from(users)
-              .where(eq(users.usernameNormalized, identifierRaw.replace(/^@+/, '').toLowerCase()))
-              .limit(1);
+      const keyHash = hashSessionToken(accessKey);
+      const userRows = await database
+        .select({
+          id: users.id,
+          emailMasked: users.emailMasked,
+          createdAt: users.createdAt,
+        })
+        .from(users)
+        .where(eq(users.passwordHash, keyHash))
+        .limit(1);
 
       const userRow = userRows[0];
       if (!userRow) {
-        return res.status(401).json({ error: 'Invalid credentials.' });
-      }
-
-      const validPassword = await verifyPassword(password, userRow.passwordHash);
-      if (!validPassword) {
-        return res.status(401).json({ error: 'Invalid credentials.' });
+        return res.status(401).json({ error: 'Access Key not recognized.' });
       }
 
       const deviceId = crypto.randomUUID();
@@ -509,41 +484,16 @@ export function createAuthRouter(database: PgDatabase) {
         createdAt: nowIso,
       });
 
-      const keyRows = await database
-        .select({
-          ecdhPublicJwk: identityKeys.ecdhPublicJwk,
-          ecdsaPublicJwk: identityKeys.ecdsaPublicJwk,
-          encryptedKeyBackup: identityKeys.encryptedKeyBackup,
-          backupSalt: identityKeys.backupSalt,
-          backupIv: identityKeys.backupIv,
-          fingerprint: identityKeys.fingerprint,
-        })
-        .from(identityKeys)
-        .where(eq(identityKeys.userId, userRow.id))
-        .limit(1);
-      const keyBackup = keyRows[0];
-
       setSessionCookie(req, res, rawSessionToken);
 
       const user = await getPublicUserById(database, userRow.id, userRow.id);
       return res.json({
         sessionToken: rawSessionToken,
         user: { ...user, maskedEmail: userRow.emailMasked, createdAt: userRow.createdAt },
-        keyBackup:
-          keyBackup && keyBackup.encryptedKeyBackup
-            ? {
-                encryptedPrivateKey: keyBackup.encryptedKeyBackup,
-                salt: keyBackup.backupSalt,
-                iv: keyBackup.backupIv,
-                ecdhPublicJwk: keyBackup.ecdhPublicJwk,
-                ecdsaPublicJwk: keyBackup.ecdsaPublicJwk,
-                fingerprint: keyBackup.fingerprint,
-              }
-            : null,
       });
     } catch (error) {
-      console.error('login error:', error);
-      return res.status(500).json({ error: 'Sign in failed.' });
+      console.error('access-key login error:', error);
+      return res.status(500).json({ error: 'Access Key sign-in failed.' });
     }
   });
 
