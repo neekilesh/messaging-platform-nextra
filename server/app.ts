@@ -3,7 +3,6 @@ import express from 'express';
 import { and, isNotNull, lte, eq } from 'drizzle-orm';
 import type { PgDatabase } from '../src/db/index.ts';
 import {
-  emailVerifications,
   messageAttachments,
   messages,
   stories,
@@ -65,7 +64,6 @@ export async function runRetentionCleanup(database: PgDatabase) {
   }
 
   await database.delete(stories).where(lte(stories.expiresAt, nowIso));
-  await database.delete(emailVerifications).where(lte(emailVerifications.expiresAt, nowIso));
 }
 
 export function createApiApp(database: PgDatabase) {

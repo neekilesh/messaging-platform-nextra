@@ -9,7 +9,6 @@ import {
   EyeOff,
   KeyRound,
   Lock,
-  Mail,
   ShieldCheck,
   Upload,
   User,
@@ -32,14 +31,9 @@ type AuthScreen =
   | 'splash'
   | 'welcome'
   | 'login'
-  | 'register_email'
-  | 'register_otp'
-  | 'register_profile'
+  | 'register_id'
   | 'google_profile'
-  | 'google_unlock'
-  | 'forgot_email'
-  | 'forgot_otp'
-  | 'forgot_reset';
+  | 'google_unlock';
 
 interface AuthFlowProps {
   onAuthenticated: (user: AuthUser, keys: StoredLocalKeyBundle) => void;
@@ -56,13 +50,7 @@ export function AuthFlow({ onAuthenticated }: AuthFlowProps) {
   const [loginPassword, setLoginPassword] = useState('');
   const [showLoginPw, setShowLoginPw] = useState(false);
 
-  // Registration & reset state
-  const [email, setEmail] = useState('');
-  const [otp, setOtp] = useState('');
-  const [devOtpPreview, setDevOtpPreview] = useState<string | null>(null);
-  const [cooldownSec, setCooldownSec] = useState(0);
-  const [verificationToken, setVerificationToken] = useState('');
-
+  // Registration state
   const [username, setUsername] = useState('');
   const [usernameStatus, setUsernameStatus] = useState<{
     checking: boolean;
@@ -73,8 +61,6 @@ export function AuthFlow({ onAuthenticated }: AuthFlowProps) {
   const [password, setPassword] = useState('');
   const [showRegPw, setShowRegPw] = useState(false);
   const [avatarUrl, setAvatarUrl] = useState<string | null>(null);
-
-  const [newPassword, setNewPassword] = useState('');
 
   // Google Sign-In state
   const [googleLoading, setGoogleLoading] = useState(false);
@@ -94,13 +80,7 @@ export function AuthFlow({ onAuthenticated }: AuthFlowProps) {
   }, [screen]);
 
   useEffect(() => {
-    if (cooldownSec <= 0) return;
-    const t = setTimeout(() => setCooldownSec((c) => Math.max(0, c - 1)), 1000);
-    return () => clearTimeout(t);
-  }, [cooldownSec]);
-
-  useEffect(() => {
-    if (screen !== 'register_profile' && screen !== 'google_profile') return;
+    if (screen !== 'register_id' && screen !== 'google_profile') return;
     const clean = username.trim().replace(/^@+/, '');
     if (clean.length < 3) {
       setUsernameStatus({ checking: false, available: null });
@@ -136,53 +116,6 @@ export function AuthFlow({ onAuthenticated }: AuthFlowProps) {
     reader.readAsDataURL(file);
   };
 
-  const requestOtp = async (purpose: 'register' | 'reset') => {
-    setError(null);
-    setInfoMsg(null);
-    setLoading(true);
-    try {
-      const res = await apiRequest<{
-        cooldownSeconds: number;
-        deliveredViaSmtp: boolean;
-        devOtpPreview?: string;
-      }>('/api/v1/auth/request-otp', {
-        method: 'POST',
-        body: JSON.stringify({ email: email.trim(), purpose }),
-      });
-      setCooldownSec(res.cooldownSeconds || 30);
-      setDevOtpPreview(res.devOtpPreview || null);
-      setInfoMsg(
-        res.deliveredViaSmtp
-          ? 'A 6-digit verification code was sent to your email.'
-          : 'Verification code generated. Enter the 6-digit code below.'
-      );
-      setScreen(purpose === 'register' ? 'register_otp' : 'forgot_otp');
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to send verification code.');
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const verifyOtp = async (purpose: 'register' | 'reset') => {
-    setError(null);
-    setLoading(true);
-    try {
-      const res = await apiRequest<{ verified: boolean; verificationToken: string }>('/api/v1/auth/verify-otp', {
-        method: 'POST',
-        body: JSON.stringify({ email: email.trim(), otp: otp.trim(), purpose }),
-      });
-      setVerificationToken(res.verificationToken);
-      setDevOtpPreview(null);
-      setInfoMsg(null);
-      setScreen(purpose === 'register' ? 'register_profile' : 'forgot_reset');
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Verification failed.');
-    } finally {
-      setLoading(false);
-    }
-  };
-
   const completeRegistration = async (e: React.FormEvent) => {
     e.preventDefault();
     setError(null);
@@ -194,8 +127,6 @@ export function AuthFlow({ onAuthenticated }: AuthFlowProps) {
       const res = await apiRequest<{ sessionToken: string; user: AuthUser }>('/api/v1/auth/register', {
         method: 'POST',
         body: JSON.stringify({
-          email: email.trim(),
-          verificationToken,
           username: username.trim().replace(/^@+/, ''),
           displayName: displayName.trim(),
           password,
@@ -270,30 +201,6 @@ export function AuthFlow({ onAuthenticated }: AuthFlowProps) {
       onAuthenticated(res.user, localKeys);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Sign in failed.');
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const handleResetPassword = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setError(null);
-    setLoading(true);
-    try {
-      await apiRequest('/api/v1/auth/reset-password', {
-        method: 'POST',
-        body: JSON.stringify({
-          email: email.trim(),
-          verificationToken,
-          newPassword,
-        }),
-      });
-      setInfoMsg('Password updated. Sign in with your new password.');
-      setOtp('');
-      setNewPassword('');
-      setScreen('login');
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Could not reset password.');
     } finally {
       setLoading(false);
     }
@@ -515,7 +422,7 @@ export function AuthFlow({ onAuthenticated }: AuthFlowProps) {
               <div className="flex flex-wrap items-center gap-2 text-xs text-slate-400">
                 <span>Unique @username</span>
                 <span aria-hidden="true">·</span>
-                <span>Email OTP verification</span>
+                <span>Instant ID creation</span>
                 <span aria-hidden="true">·</span>
                 <span>25-member encrypted groups</span>
               </div>
@@ -525,7 +432,7 @@ export function AuthFlow({ onAuthenticated }: AuthFlowProps) {
               <div className="space-y-2">
                 <h2 className="text-xl font-display font-semibold text-white">Enter NEXORA</h2>
                 <p className="text-sm text-slate-400">
-                  Create a verified identity or sign in to restore your encrypted key vault.
+                  Create a unique @username ID or sign in to restore your encrypted key vault.
                 </p>
               </div>
 
@@ -534,11 +441,11 @@ export function AuthFlow({ onAuthenticated }: AuthFlowProps) {
                   onClick={() => {
                     setError(null);
                     setInfoMsg(null);
-                    setScreen('register_email');
+                    setScreen('register_id');
                   }}
                   className="w-full h-12 rounded-xl bg-violet-600 hover:bg-violet-500 text-white font-medium text-sm flex items-center justify-center gap-2 transition-colors cursor-pointer"
                 >
-                  <span>Create Account</span>
+                  <span>Create NEXORA ID</span>
                   <ArrowRight className="w-4 h-4" />
                 </button>
                 <button
@@ -601,16 +508,12 @@ export function AuthFlow({ onAuthenticated }: AuthFlowProps) {
                   setInfoMsg(null);
                   if (
                     screen === 'login' ||
-                    screen === 'register_email' ||
+                    screen === 'register_id' ||
                     screen === 'google_profile' ||
                     screen === 'google_unlock'
                   ) {
                     setScreen('welcome');
-                  } else if (screen === 'register_otp') setScreen('register_email');
-                  else if (screen === 'register_profile') setScreen('register_otp');
-                  else if (screen === 'forgot_email') setScreen('login');
-                  else if (screen === 'forgot_otp') setScreen('forgot_email');
-                  else if (screen === 'forgot_reset') setScreen('forgot_otp');
+                  }
                 }}
                 className="inline-flex items-center gap-1.5 text-sm text-slate-400 hover:text-white transition-colors min-h-[40px] cursor-pointer"
               >
@@ -635,11 +538,11 @@ export function AuthFlow({ onAuthenticated }: AuthFlowProps) {
               <form onSubmit={handleLogin} className="space-y-4">
                 <div>
                   <h2 className="text-2xl font-display font-bold text-white">Sign in to NEXORA</h2>
-                  <p className="text-sm text-slate-400 mt-1">Use your @username or verified email address.</p>
+                  <p className="text-sm text-slate-400 mt-1">Enter your @username and password.</p>
                 </div>
 
                 <div className="space-y-1.5">
-                  <label className="text-xs font-medium text-slate-300">Username or Email</label>
+                  <label className="text-xs font-medium text-slate-300">@username</label>
                   <div className="relative">
                     <User className="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
                     <input
@@ -647,7 +550,7 @@ export function AuthFlow({ onAuthenticated }: AuthFlowProps) {
                       required
                       value={loginIdentifier}
                       onChange={(e) => setLoginIdentifier(e.target.value)}
-                      placeholder="@ShadowKing or you@gmail.com"
+                      placeholder="@ShadowKing"
                       className="w-full h-11 pl-10 pr-4 rounded-xl bg-slate-900/80 border border-white/10 text-sm text-white placeholder:text-slate-500 focus:outline-none focus:border-violet-500"
                     />
                   </div>
@@ -674,19 +577,6 @@ export function AuthFlow({ onAuthenticated }: AuthFlowProps) {
                       {showLoginPw ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
                     </button>
                   </div>
-                </div>
-
-                <div className="flex justify-end">
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setError(null);
-                      setScreen('forgot_email');
-                    }}
-                    className="text-xs text-violet-300 hover:text-violet-200 cursor-pointer"
-                  >
-                    Forgot password?
-                  </button>
                 </div>
 
                 <button
@@ -718,131 +608,12 @@ export function AuthFlow({ onAuthenticated }: AuthFlowProps) {
               </form>
             )}
 
-            {screen === 'register_email' && (
-              <form
-                onSubmit={(e) => {
-                  e.preventDefault();
-                  requestOtp('register');
-                }}
-                className="space-y-4"
-              >
-                <div>
-                  <h2 className="text-2xl font-display font-bold text-white">Create your account</h2>
-                  <p className="text-sm text-slate-400 mt-1">
-                    Step 1 of 3 · Verify your Gmail or email address with a 6-digit code.
-                  </p>
-                </div>
-
-                <div className="space-y-1.5">
-                  <label className="text-xs font-medium text-slate-300">Email Address</label>
-                  <div className="relative">
-                    <Mail className="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
-                    <input
-                      type="email"
-                      required
-                      value={email}
-                      onChange={(e) => setEmail(e.target.value)}
-                      placeholder="you@gmail.com"
-                      className="w-full h-11 pl-10 pr-4 rounded-xl bg-slate-900/80 border border-white/10 text-sm text-white placeholder:text-slate-500 focus:outline-none focus:border-violet-500"
-                    />
-                  </div>
-                </div>
-
-                <button
-                  type="submit"
-                  disabled={loading}
-                  className="w-full h-11 rounded-xl bg-violet-600 hover:bg-violet-500 disabled:opacity-50 text-white font-medium text-sm transition-colors cursor-pointer"
-                >
-                  {loading ? 'Sending Code...' : 'Send Verification Code'}
-                </button>
-
-                <div className="relative py-1">
-                  <div className="absolute inset-0 flex items-center">
-                    <div className="w-full border-t border-white/10" />
-                  </div>
-                  <div className="relative flex justify-center text-[11px] uppercase tracking-wider">
-                    <span className="bg-slate-950/90 px-2.5 text-slate-500">instant option</span>
-                  </div>
-                </div>
-
-                <button
-                  type="button"
-                  disabled={googleLoading}
-                  onClick={handleGoogleSignIn}
-                  className="w-full h-11 rounded-xl bg-white/95 hover:bg-white disabled:opacity-60 text-slate-900 font-medium text-sm flex items-center justify-center gap-2.5 transition-colors cursor-pointer"
-                >
-                  <GoogleIcon />
-                  <span>{googleLoading ? 'Connecting Google...' : 'Continue with Google'}</span>
-                </button>
-              </form>
-            )}
-
-            {(screen === 'register_otp' || screen === 'forgot_otp') && (
-              <form
-                onSubmit={(e) => {
-                  e.preventDefault();
-                  verifyOtp(screen === 'register_otp' ? 'register' : 'reset');
-                }}
-                className="space-y-4"
-              >
-                <div>
-                  <h2 className="text-2xl font-display font-bold text-white">Verify your email</h2>
-                  <p className="text-sm text-slate-400 mt-1">
-                    Enter the 6-digit verification code sent to <span className="text-slate-200">{email}</span>.
-                  </p>
-                </div>
-
-                {devOtpPreview && (
-                  <div className="rounded-xl bg-violet-500/15 border border-violet-500/35 px-4 py-3 text-xs text-violet-200 space-y-1">
-                    <div className="font-medium text-violet-100">Development Email Delivery Preview</div>
-                    <div>
-                      SMTP is not configured in this preview environment. Your verification code is{' '}
-                      <span className="font-mono-tabular font-bold text-cyan-300 text-sm">{devOtpPreview}</span>
-                    </div>
-                  </div>
-                )}
-
-                <div className="space-y-1.5">
-                  <label className="text-xs font-medium text-slate-300">6-Digit OTP Code</label>
-                  <input
-                    type="text"
-                    inputMode="numeric"
-                    maxLength={6}
-                    required
-                    value={otp}
-                    onChange={(e) => setOtp(e.target.value.replace(/\D/g, ''))}
-                    placeholder="000000"
-                    className="w-full h-12 px-4 text-center font-mono-tabular text-2xl tracking-[0.4em] rounded-xl bg-slate-900/80 border border-white/10 text-cyan-300 placeholder:text-slate-600 focus:outline-none focus:border-violet-500"
-                  />
-                </div>
-
-                <button
-                  type="submit"
-                  disabled={loading || otp.length !== 6}
-                  className="w-full h-11 rounded-xl bg-violet-600 hover:bg-violet-500 disabled:opacity-50 text-white font-medium text-sm transition-colors cursor-pointer"
-                >
-                  {loading ? 'Verifying...' : 'Verify Code'}
-                </button>
-
-                <div className="flex justify-center">
-                  <button
-                    type="button"
-                    disabled={cooldownSec > 0 || loading}
-                    onClick={() => requestOtp(screen === 'register_otp' ? 'register' : 'reset')}
-                    className="text-xs text-slate-400 hover:text-violet-300 disabled:opacity-50 cursor-pointer"
-                  >
-                    {cooldownSec > 0 ? `Resend code in ${cooldownSec}s` : 'Resend verification code'}
-                  </button>
-                </div>
-              </form>
-            )}
-
-            {screen === 'register_profile' && (
+            {screen === 'register_id' && (
               <form onSubmit={completeRegistration} className="space-y-4">
                 <div>
-                  <h2 className="text-2xl font-display font-bold text-white">Claim your identity</h2>
+                  <h2 className="text-2xl font-display font-bold text-white">Create your NEXORA ID</h2>
                   <p className="text-sm text-slate-400 mt-1">
-                    Step 3 of 3 · Choose your unique @username and encryption password.
+                    Instant setup · Pick your unique @username and encryption password.
                   </p>
                 </div>
 
@@ -946,44 +717,26 @@ export function AuthFlow({ onAuthenticated }: AuthFlowProps) {
                   disabled={loading || usernameStatus.available === false}
                   className="w-full h-11 rounded-xl bg-violet-600 hover:bg-violet-500 disabled:opacity-50 text-white font-medium text-sm transition-colors cursor-pointer"
                 >
-                  {loading ? 'Generating E2EE Keys & Creating Account...' : 'Complete Registration'}
+                  {loading ? 'Generating E2EE Keys & Creating ID...' : 'Create NEXORA ID'}
                 </button>
-              </form>
-            )}
 
-            {screen === 'forgot_email' && (
-              <form
-                onSubmit={(e) => {
-                  e.preventDefault();
-                  requestOtp('reset');
-                }}
-                className="space-y-4"
-              >
-                <div>
-                  <h2 className="text-2xl font-display font-bold text-white">Reset password</h2>
-                  <p className="text-sm text-slate-400 mt-1">
-                    Enter your registered email address to receive a recovery verification code.
-                  </p>
-                </div>
-
-                <div className="space-y-1.5">
-                  <label className="text-xs font-medium text-slate-300">Email Address</label>
-                  <input
-                    type="email"
-                    required
-                    value={email}
-                    onChange={(e) => setEmail(e.target.value)}
-                    placeholder="you@gmail.com"
-                    className="w-full h-11 px-4 rounded-xl bg-slate-900/80 border border-white/10 text-sm text-white placeholder:text-slate-500 focus:outline-none focus:border-violet-500"
-                  />
+                <div className="relative py-1">
+                  <div className="absolute inset-0 flex items-center">
+                    <div className="w-full border-t border-white/10" />
+                  </div>
+                  <div className="relative flex justify-center text-[11px] uppercase tracking-wider">
+                    <span className="bg-slate-950/90 px-2.5 text-slate-500">or</span>
+                  </div>
                 </div>
 
                 <button
-                  type="submit"
-                  disabled={loading}
-                  className="w-full h-11 rounded-xl bg-violet-600 hover:bg-violet-500 disabled:opacity-50 text-white font-medium text-sm transition-colors cursor-pointer"
+                  type="button"
+                  disabled={googleLoading}
+                  onClick={handleGoogleSignIn}
+                  className="w-full h-11 rounded-xl bg-white/95 hover:bg-white disabled:opacity-60 text-slate-900 font-medium text-sm flex items-center justify-center gap-2.5 transition-colors cursor-pointer"
                 >
-                  {loading ? 'Sending Recovery Code...' : 'Send Recovery Code'}
+                  <GoogleIcon />
+                  <span>{googleLoading ? 'Connecting Google...' : 'Continue with Google'}</span>
                 </button>
               </form>
             )}
@@ -1129,36 +882,6 @@ export function AuthFlow({ onAuthenticated }: AuthFlowProps) {
               </form>
             )}
 
-            {screen === 'forgot_reset' && (
-              <form onSubmit={handleResetPassword} className="space-y-4">
-                <div>
-                  <h2 className="text-2xl font-display font-bold text-white">Create new password</h2>
-                  <p className="text-sm text-slate-400 mt-1">
-                    Choose a strong new password for your NEXORA account.
-                  </p>
-                </div>
-
-                <div className="space-y-1.5">
-                  <label className="text-xs font-medium text-slate-300">New Password</label>
-                  <input
-                    type="password"
-                    required
-                    value={newPassword}
-                    onChange={(e) => setNewPassword(e.target.value)}
-                    placeholder="Min 8 chars, upper, lower & number"
-                    className="w-full h-11 px-4 rounded-xl bg-slate-900/80 border border-white/10 text-sm text-white placeholder:text-slate-500 focus:outline-none focus:border-violet-500"
-                  />
-                </div>
-
-                <button
-                  type="submit"
-                  disabled={loading}
-                  className="w-full h-11 rounded-xl bg-violet-600 hover:bg-violet-500 disabled:opacity-50 text-white font-medium text-sm transition-colors cursor-pointer"
-                >
-                  {loading ? 'Updating Password...' : 'Reset Password'}
-                </button>
-              </form>
-            )}
           </motion.div>
         )}
       </AnimatePresence>

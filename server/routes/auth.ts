@@ -4,7 +4,6 @@ import { and, desc, eq, gt, isNull } from 'drizzle-orm';
 import type { PgDatabase } from '../../src/db/index.ts';
 import {
   devices,
-  emailVerifications,
   identityKeys,
   privacySettings,
   userSessions,
@@ -13,24 +12,18 @@ import {
 import { adminAuth } from '../../src/lib/firebase-admin.ts';
 import {
   createRateLimiter,
-  generateOtpCode,
   generateSessionToken,
   hashEmail,
-  hashOtp,
   hashPassword,
   hashSessionToken,
   maskEmail,
   validatePasswordStrength,
   validateUsernameFormat,
-  verifyOtpHash,
   verifyPassword,
 } from '../security.ts';
-import { sendVerificationOtpEmail } from '../email.ts';
 import { createRequireAuth, getPublicUserById } from '../context.ts';
 import type { AuthedRequest } from '../context.ts';
 
-const OTP_TTL_MS = 10 * 60 * 1000;
-const RESEND_COOLDOWN_MS = 30 * 1000;
 const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 
 function isHttpsRequest(req: { secure?: boolean; headers: Record<string, string | string[] | undefined> }) {
@@ -56,152 +49,8 @@ export function createAuthRouter(database: PgDatabase) {
   const router = Router();
   const requireAuth = createRequireAuth(database);
 
-  const otpLimiter = createRateLimiter({ windowMs: 60_000, max: 10, keyPrefix: 'otp' });
+  const registerLimiter = createRateLimiter({ windowMs: 60_000, max: 15, keyPrefix: 'register' });
   const loginLimiter = createRateLimiter({ windowMs: 60_000, max: 15, keyPrefix: 'login' });
-
-  router.post('/request-otp', otpLimiter, async (req, res) => {
-    try {
-      const emailRaw = typeof req.body?.email === 'string' ? req.body.email.trim().toLowerCase() : '';
-      const purpose = req.body?.purpose === 'reset' ? 'reset' : 'register';
-
-      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(emailRaw)) {
-        return res.status(400).json({ error: 'Please enter a valid email address.' });
-      }
-
-      const emailH = hashEmail(emailRaw);
-      const existingUsers = await database
-        .select({ id: users.id })
-        .from(users)
-        .where(eq(users.emailHash, emailH))
-        .limit(1);
-      const existingUser = existingUsers[0];
-
-      if (purpose === 'register' && existingUser) {
-        return res.status(409).json({ error: 'An account with this email already exists.' });
-      }
-      if (purpose === 'reset' && !existingUser) {
-        return res.status(404).json({ error: 'No account is registered with that email address.' });
-      }
-
-      const nowMs = Date.now();
-      const nowIso = new Date(nowMs).toISOString();
-
-      const latestRows = await database
-        .select({ resendAvailableAt: emailVerifications.resendAvailableAt })
-        .from(emailVerifications)
-        .where(
-          and(
-            eq(emailVerifications.emailNormalized, emailRaw),
-            eq(emailVerifications.purpose, purpose)
-          )
-        )
-        .orderBy(desc(emailVerifications.createdAt))
-        .limit(1);
-      const latest = latestRows[0];
-
-      if (latest && Date.parse(latest.resendAvailableAt) > nowMs) {
-        const waitSec = Math.ceil((Date.parse(latest.resendAvailableAt) - nowMs) / 1000);
-        return res.status(429).json({
-          error: `Please wait ${waitSec}s before requesting another code.`,
-          retryAfterSec: waitSec,
-        });
-      }
-
-      const otp = generateOtpCode();
-      const salt = crypto.randomBytes(16).toString('hex');
-      const otpHash = hashOtp(emailRaw, purpose, otp, salt);
-      const id = crypto.randomUUID();
-      const expiresAt = new Date(nowMs + OTP_TTL_MS).toISOString();
-      const resendAvailableAt = new Date(nowMs + RESEND_COOLDOWN_MS).toISOString();
-
-      await database.insert(emailVerifications).values({
-        id,
-        emailNormalized: emailRaw,
-        purpose,
-        otpHash,
-        salt,
-        attempts: 0,
-        verified: 0,
-        expiresAt,
-        resendAvailableAt,
-        createdAt: nowIso,
-      });
-
-      const emailResult = await sendVerificationOtpEmail(emailRaw, otp, purpose);
-      return res.json({
-        verificationId: id,
-        expiresAt,
-        cooldownSeconds: 30,
-        deliveredViaSmtp: emailResult.deliveredViaSmtp,
-        ...(emailResult.devOtpPreview ? { devOtpPreview: emailResult.devOtpPreview } : {}),
-      });
-    } catch (error) {
-      console.error('request-otp error:', error);
-      return res.status(500).json({ error: 'Failed to issue verification code.' });
-    }
-  });
-
-  router.post('/verify-otp', otpLimiter, async (req, res) => {
-    try {
-      const emailRaw = typeof req.body?.email === 'string' ? req.body.email.trim().toLowerCase() : '';
-      const otp = typeof req.body?.otp === 'string' ? req.body.otp.trim() : '';
-      const purpose = req.body?.purpose === 'reset' ? 'reset' : 'register';
-
-      if (!emailRaw || !/^\d{6}$/.test(otp)) {
-        return res.status(400).json({ error: 'Enter a valid 6-digit verification code.' });
-      }
-
-      const records = await database
-        .select()
-        .from(emailVerifications)
-        .where(
-          and(
-            eq(emailVerifications.emailNormalized, emailRaw),
-            eq(emailVerifications.purpose, purpose)
-          )
-        )
-        .orderBy(desc(emailVerifications.createdAt))
-        .limit(1);
-
-      const record = records[0];
-      if (!record) {
-        return res.status(400).json({ error: 'No verification request found for this email.' });
-      }
-
-      if (Date.parse(record.expiresAt) <= Date.now()) {
-        return res.status(400).json({ error: 'Verification code has expired. Request a new one.' });
-      }
-
-      if (record.attempts >= 5) {
-        return res.status(429).json({ error: 'Too many invalid OTP attempts. Request a new code.' });
-      }
-
-      const valid = verifyOtpHash(emailRaw, purpose, otp, record.salt, record.otpHash);
-      if (!valid) {
-        await database
-          .update(emailVerifications)
-          .set({ attempts: record.attempts + 1 })
-          .where(eq(emailVerifications.id, record.id));
-        return res.status(400).json({ error: 'Incorrect verification code.' });
-      }
-
-      const verificationToken = generateSessionToken();
-      const tokenHash = hashSessionToken(verificationToken);
-
-      await database
-        .update(emailVerifications)
-        .set({ verified: 1, verificationTokenHash: tokenHash })
-        .where(eq(emailVerifications.id, record.id));
-
-      return res.json({
-        verified: true,
-        verificationToken,
-      });
-    } catch (error) {
-      console.error('verify-otp error:', error);
-      return res.status(500).json({ error: 'Verification check failed.' });
-    }
-  });
 
   router.get('/check-username', async (req, res) => {
     try {
@@ -458,10 +307,8 @@ export function createAuthRouter(database: PgDatabase) {
     }
   });
 
-  router.post('/register', otpLimiter, async (req, res) => {
+  router.post('/register', registerLimiter, async (req, res) => {
     try {
-      const emailRaw = typeof req.body?.email === 'string' ? req.body.email.trim().toLowerCase() : '';
-      const verificationToken = typeof req.body?.verificationToken === 'string' ? req.body.verificationToken : '';
       const usernameRaw = typeof req.body?.username === 'string' ? req.body.username.trim().replace(/^@+/, '') : '';
       const displayName = typeof req.body?.displayName === 'string' ? req.body.displayName.trim() : '';
       const password = typeof req.body?.password === 'string' ? req.body.password : '';
@@ -479,33 +326,6 @@ export function createAuthRouter(database: PgDatabase) {
           }
         | undefined;
 
-      if (!emailRaw || !verificationToken) {
-        return res.status(400).json({ error: 'Verified email token is required.' });
-      }
-
-      const tokenHash = hashSessionToken(verificationToken);
-      const verifRows = await database
-        .select({
-          id: emailVerifications.id,
-          expiresAt: emailVerifications.expiresAt,
-        })
-        .from(emailVerifications)
-        .where(
-          and(
-            eq(emailVerifications.emailNormalized, emailRaw),
-            eq(emailVerifications.purpose, 'register'),
-            eq(emailVerifications.verified, 1),
-            eq(emailVerifications.verificationTokenHash, tokenHash)
-          )
-        )
-        .orderBy(desc(emailVerifications.createdAt))
-        .limit(1);
-
-      const verif = verifRows[0];
-      if (!verif || Date.parse(verif.expiresAt) <= Date.now()) {
-        return res.status(400).json({ error: 'Email verification is invalid or expired.' });
-      }
-
       const usernameCheck = validateUsernameFormat(usernameRaw);
       if (!usernameCheck.valid) {
         return res.status(400).json({ error: usernameCheck.reason });
@@ -521,7 +341,6 @@ export function createAuthRouter(database: PgDatabase) {
         return res.status(400).json({ error: 'End-to-end encryption public keys are required.' });
       }
 
-      const emailH = hashEmail(emailRaw);
       const existingUsername = await database
         .select({ id: users.id })
         .from(users)
@@ -529,15 +348,6 @@ export function createAuthRouter(database: PgDatabase) {
         .limit(1);
       if (existingUsername.length > 0) {
         return res.status(409).json({ error: 'Username is already taken.' });
-      }
-
-      const existingEmail = await database
-        .select({ id: users.id })
-        .from(users)
-        .where(eq(users.emailHash, emailH))
-        .limit(1);
-      if (existingEmail.length > 0) {
-        return res.status(409).json({ error: 'Email is already registered.' });
       }
 
       const passwordHash = await hashPassword(password);
@@ -548,7 +358,8 @@ export function createAuthRouter(database: PgDatabase) {
       const sessionTokenHash = hashSessionToken(rawSessionToken);
       const nowIso = new Date().toISOString();
       const sessionExpiresAt = new Date(Date.now() + SESSION_TTL_MS).toISOString();
-      const masked = maskEmail(emailRaw);
+      const emailH = hashEmail(`${usernameCheck.normalized}.${userId}@id.nexora.local`);
+      const masked = 'NEXORA ID';
 
       await database.transaction(async (tx) => {
         await tx.insert(users).values({
@@ -611,8 +422,6 @@ export function createAuthRouter(database: PgDatabase) {
           createdAt: nowIso,
           updatedAt: nowIso,
         });
-
-        await tx.delete(emailVerifications).where(eq(emailVerifications.id, verif.id));
       });
 
       setSessionCookie(req, res, rawSessionToken);
@@ -735,73 +544,6 @@ export function createAuthRouter(database: PgDatabase) {
     } catch (error) {
       console.error('login error:', error);
       return res.status(500).json({ error: 'Sign in failed.' });
-    }
-  });
-
-  router.post('/reset-password', otpLimiter, async (req, res) => {
-    try {
-      const emailRaw = typeof req.body?.email === 'string' ? req.body.email.trim().toLowerCase() : '';
-      const verificationToken = typeof req.body?.verificationToken === 'string' ? req.body.verificationToken : '';
-      const newPassword = typeof req.body?.newPassword === 'string' ? req.body.newPassword : '';
-
-      const pwCheck = validatePasswordStrength(newPassword);
-      if (!pwCheck.valid) {
-        return res.status(400).json({ error: pwCheck.reason });
-      }
-
-      const tokenHash = hashSessionToken(verificationToken);
-      const verifRows = await database
-        .select({
-          id: emailVerifications.id,
-          expiresAt: emailVerifications.expiresAt,
-        })
-        .from(emailVerifications)
-        .where(
-          and(
-            eq(emailVerifications.emailNormalized, emailRaw),
-            eq(emailVerifications.purpose, 'reset'),
-            eq(emailVerifications.verified, 1),
-            eq(emailVerifications.verificationTokenHash, tokenHash)
-          )
-        )
-        .orderBy(desc(emailVerifications.createdAt))
-        .limit(1);
-
-      const verif = verifRows[0];
-      if (!verif || Date.parse(verif.expiresAt) <= Date.now()) {
-        return res.status(400).json({ error: 'Password reset verification is invalid or expired.' });
-      }
-
-      const emailH = hashEmail(emailRaw);
-      const userRows = await database
-        .select({ id: users.id })
-        .from(users)
-        .where(eq(users.emailHash, emailH))
-        .limit(1);
-      const user = userRows[0];
-      if (!user) {
-        return res.status(404).json({ error: 'Account not found.' });
-      }
-
-      const passwordHash = await hashPassword(newPassword);
-      const nowIso = new Date().toISOString();
-
-      await database.transaction(async (tx) => {
-        await tx
-          .update(users)
-          .set({ passwordHash, updatedAt: nowIso })
-          .where(eq(users.id, user.id));
-        await tx
-          .update(userSessions)
-          .set({ revokedAt: nowIso })
-          .where(and(eq(userSessions.userId, user.id), isNull(userSessions.revokedAt)));
-        await tx.delete(emailVerifications).where(eq(emailVerifications.id, verif.id));
-      });
-
-      return res.json({ success: true });
-    } catch (error) {
-      console.error('reset-password error:', error);
-      return res.status(500).json({ error: 'Failed to reset password.' });
     }
   });
 

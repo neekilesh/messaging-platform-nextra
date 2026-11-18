@@ -205,7 +205,11 @@ export function SettingsPanel({ user, myKeys, onUserUpdated, onLogout }: Setting
                 <span>Change Avatar</span>
                 <input type="file" accept="image/*" onChange={handleAvatarUpload} className="hidden" />
               </label>
-              <div className="text-xs text-slate-400">Verified Email: {user.maskedEmail} (Private)</div>
+              <div className="text-xs text-slate-400">
+                {user.maskedEmail === 'NEXORA ID'
+                  ? `NEXORA ID: @${user.username}`
+                  : `Private Account: ${user.maskedEmail}`}
+              </div>
             </div>
           </div>
 

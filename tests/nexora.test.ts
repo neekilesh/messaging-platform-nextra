@@ -4,7 +4,7 @@ import http from 'node:http';
 import crypto from 'node:crypto';
 import { eq, inArray } from 'drizzle-orm';
 import { createPool, db } from '../src/db/index.ts';
-import { emailVerifications, messages, stories, users } from '../src/db/schema.ts';
+import { messages, stories, users } from '../src/db/schema.ts';
 import { createApiApp, runRetentionCleanup } from '../server/app.ts';
 import { setupSocketServer } from '../server/socket.ts';
 import { recordStreakActivity } from '../server/streaks.ts';
@@ -87,7 +87,6 @@ describe('NEXORA Full-Stack Integration & Security Suite', () => {
   let baseUrl: string;
   const runTag = crypto.randomBytes(3).toString('hex');
   const createdUserIds: string[] = [];
-  const createdEmails: string[] = [];
 
   before(async () => {
     process.env.NODE_ENV = 'test';
@@ -110,12 +109,6 @@ describe('NEXORA Full-Stack Integration & Security Suite', () => {
     if (createdUserIds.length > 0) {
       await db.delete(users).where(inArray(users.id, createdUserIds)).catch(() => {});
     }
-    if (createdEmails.length > 0) {
-      await db
-        .delete(emailVerifications)
-        .where(inArray(emailVerifications.emailNormalized, createdEmails))
-        .catch(() => {});
-    }
     await createPool().end().catch(() => {});
   });
 
@@ -132,31 +125,12 @@ describe('NEXORA Full-Stack Integration & Security Suite', () => {
     return { status: res.status, data };
   }
 
-  async function registerUser(email: string, username: string, password = 'StrongPass123') {
-    const uniqueEmail = email.replace('@', `+${runTag}@`);
+  async function registerUser(_email: string, username: string, password = 'StrongPass123') {
     const uniqueUsername = `${username}_${runTag}`;
-    createdEmails.push(uniqueEmail.toLowerCase());
-
-    const otpReq = await api('/api/v1/auth/request-otp', {
-      method: 'POST',
-      body: JSON.stringify({ email: uniqueEmail, purpose: 'register' }),
-    });
-    assert.equal(otpReq.status, 200);
-    const otpCode = otpReq.data.devOtpPreview;
-    assert.ok(otpCode, 'Dev OTP preview should be issued in test mode');
-
-    const verif = await api('/api/v1/auth/verify-otp', {
-      method: 'POST',
-      body: JSON.stringify({ email: uniqueEmail, otp: otpCode, purpose: 'register' }),
-    });
-    assert.equal(verif.status, 200);
-
     const keys = await generateTestKeyBundle();
     const reg = await api('/api/v1/auth/register', {
       method: 'POST',
       body: JSON.stringify({
-        email: uniqueEmail,
-        verificationToken: verif.data.verificationToken,
         username: uniqueUsername,
         displayName: uniqueUsername,
         password,
@@ -172,37 +146,30 @@ describe('NEXORA Full-Stack Integration & Security Suite', () => {
     return { token: reg.data.sessionToken as string, user: reg.data.user, keys };
   }
 
-  test('Auth: OTP rejection, duplicate username rejection, login, and password reset', async () => {
-    const email = `alice+${runTag}@nexora.test`;
+  test('Auth: Direct ID creation, weak password rejection, duplicate username rejection, and login', async () => {
     const handle = `ShadowKing_${runTag}`;
-    createdEmails.push(email.toLowerCase());
-
-    const otpReq = await api('/api/v1/auth/request-otp', {
-      method: 'POST',
-      body: JSON.stringify({ email, purpose: 'register' }),
-    });
-    assert.equal(otpReq.status, 200);
-
-    // Reject wrong OTP
-    const badOtp = await api('/api/v1/auth/verify-otp', {
-      method: 'POST',
-      body: JSON.stringify({ email, otp: '999999', purpose: 'register' }),
-    });
-    assert.equal(badOtp.status, 400);
-
-    // Register Alice
-    const verif = await api('/api/v1/auth/verify-otp', {
-      method: 'POST',
-      body: JSON.stringify({ email, otp: otpReq.data.devOtpPreview, purpose: 'register' }),
-    });
-    assert.equal(verif.status, 200);
     const aliceKeys = await generateTestKeyBundle();
 
+    // Reject weak password
+    const weakReg = await api('/api/v1/auth/register', {
+      method: 'POST',
+      body: JSON.stringify({
+        username: handle,
+        displayName: 'Shadow King',
+        password: 'weak',
+        keys: {
+          ecdhPublicJwk: aliceKeys.ecdhPublicJwk,
+          ecdsaPublicJwk: aliceKeys.ecdsaPublicJwk,
+          fingerprint: aliceKeys.fingerprint,
+        },
+      }),
+    });
+    assert.equal(weakReg.status, 400);
+
+    // Direct ID registration succeeds
     const reg = await api('/api/v1/auth/register', {
       method: 'POST',
       body: JSON.stringify({
-        email,
-        verificationToken: verif.data.verificationToken,
         username: handle,
         displayName: 'Shadow King',
         password: 'Password123',
