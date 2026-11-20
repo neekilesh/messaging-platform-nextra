@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import express from 'express';
-import { and, isNotNull, lte, eq } from 'drizzle-orm';
+import { and, isNotNull, lte, eq, sql } from 'drizzle-orm';
 import type { PgDatabase } from '../src/db/index.ts';
 import {
   messageAttachments,
@@ -93,8 +93,15 @@ export function createApiApp(database: PgDatabase) {
 
   app.use(express.json({ limit: '5mb' }));
 
-  app.get('/api/v1/health', (_req, res) => {
-    res.json({ status: 'ok', service: 'nexora' });
+  app.get('/api/v1/health', async (_req, res) => {
+    let databaseStatus: 'connected' | 'disconnected' = 'disconnected';
+    try {
+      await database.execute(sql`SELECT 1`);
+      databaseStatus = 'connected';
+    } catch {
+      databaseStatus = 'disconnected';
+    }
+    res.json({ status: 'ok', service: 'nexora', database: databaseStatus });
   });
 
   app.use('/api/v1/auth', createAuthRouter(database));

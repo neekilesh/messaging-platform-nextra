@@ -6,6 +6,20 @@ declare global {
   var _postgresPool: Pool | undefined;
 }
 
+function shouldUseSsl(): boolean {
+  const rawSsl = process.env.SQL_SSL?.trim().toLowerCase();
+  if (rawSsl === 'true' || rawSsl === '1') return true;
+  if (rawSsl === 'false' || rawSsl === '0') return false;
+
+  const host = process.env.SQL_HOST?.trim();
+  if (!host) return false;
+  // Unix sockets (/app/cloudsql/...) and localhost do not use TLS, whereas remote Postgres hosts (Supabase/Render) require SSL
+  if (host.startsWith('/') || host === 'localhost' || host === '127.0.0.1') {
+    return false;
+  }
+  return true;
+}
+
 export const createPool = () => {
   if (!global._postgresPool) {
     global._postgresPool = new Pool({
@@ -14,7 +28,7 @@ export const createPool = () => {
       user: process.env.SQL_USER,
       password: process.env.SQL_PASSWORD,
       database: process.env.SQL_DB_NAME,
-      ...(process.env.SQL_SSL === 'true' ? { ssl: { rejectUnauthorized: false } } : {}),
+      ...(shouldUseSsl() ? { ssl: { rejectUnauthorized: false } } : {}),
       max: 10,
       connectionTimeoutMillis: 15000,
     });

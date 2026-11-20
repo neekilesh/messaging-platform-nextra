@@ -1,7 +1,9 @@
 import crypto from 'node:crypto';
-import { Router } from 'express';
+import fs from 'node:fs';
+import { Router, type Response } from 'express';
 import { and, desc, eq, gt, isNull } from 'drizzle-orm';
 import type { PgDatabase } from '../../src/db/index.ts';
+import { ensureDatabaseSchema } from '../../src/db/ensure-schema.ts';
 import {
   devices,
   identityKeys,
@@ -20,6 +22,83 @@ import {
 } from '../security.ts';
 import { createRequireAuth, getPublicUserById } from '../context.ts';
 import type { AuthedRequest } from '../context.ts';
+
+const firebaseConfig = JSON.parse(
+  fs.readFileSync(new URL('../../firebase-applet-config.json', import.meta.url), 'utf8')
+) as { apiKey?: string; projectId?: string };
+
+async function verifyFirebaseTokenWithFallback(idToken: string): Promise<{
+  uid: string;
+  email: string;
+  name?: string;
+  picture?: string;
+}> {
+  try {
+    const decoded = await adminAuth.verifyIdToken(idToken);
+    return {
+      uid: decoded.uid,
+      email: (decoded.email || '').trim().toLowerCase(),
+      name: typeof decoded.name === 'string' ? decoded.name : undefined,
+      picture: typeof decoded.picture === 'string' ? decoded.picture : undefined,
+    };
+  } catch (adminErr) {
+    if (!firebaseConfig.apiKey) {
+      throw adminErr;
+    }
+    const resp = await fetch(
+      `https://identitytoolkit.googleapis.com/v1/accounts:lookup?key=${encodeURIComponent(firebaseConfig.apiKey)}`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ idToken }),
+      }
+    );
+    if (!resp.ok) {
+      throw adminErr;
+    }
+    const data = (await resp.json()) as {
+      users?: Array<{
+        localId?: string;
+        email?: string;
+        displayName?: string;
+        photoUrl?: string;
+      }>;
+    };
+    const account = data.users?.[0];
+    if (!account?.localId) {
+      throw adminErr;
+    }
+    return {
+      uid: account.localId,
+      email: (account.email || '').trim().toLowerCase(),
+      name: account.displayName,
+      picture: account.photoUrl,
+    };
+  }
+}
+
+function handleAuthDbError(res: Response, error: unknown, fallbackMessage: string) {
+  const errObj = error as { code?: string; message?: string; cause?: { code?: string } };
+  const pgCode = errObj?.code || errObj?.cause?.code || '';
+  const msg = errObj?.message || '';
+
+  if (
+    pgCode === 'ECONNREFUSED' ||
+    pgCode === 'ENOTFOUND' ||
+    pgCode === 'ETIMEDOUT' ||
+    pgCode === '28P01' ||
+    pgCode === '3D000' ||
+    pgCode === '42P01' ||
+    /ECONNREFUSED|ENOTFOUND|password authentication failed|does not exist/i.test(msg)
+  ) {
+    return res.status(503).json({
+      error:
+        'Database is not connected on the server. Set SQL_HOST, SQL_PORT, SQL_DB_NAME, SQL_USER, SQL_PASSWORD, and SQL_SSL=true on your backend host.',
+      code: 'DATABASE_UNAVAILABLE',
+    });
+  }
+  return res.status(500).json({ error: fallbackMessage });
+}
 
 const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 const COSMIC_NAMES = ['Nova', 'Orion', 'Lyra', 'Vega', 'Nebula', 'Atlas', 'Pulse', 'Comet', 'Zenith', 'Aurora'];
@@ -100,18 +179,27 @@ export function createAuthRouter(database: PgDatabase) {
   });
 
   router.post('/firebase', loginLimiter, async (req, res) => {
-    try {
-      const authHeader = req.headers.authorization;
-      if (!authHeader || !authHeader.startsWith('Bearer ')) {
-        return res.status(401).json({ error: 'Firebase ID token is required.' });
-      }
-      const idToken = authHeader.slice(7).trim();
-      const decoded = await adminAuth.verifyIdToken(idToken);
-      const emailRaw = (decoded.email || '').trim().toLowerCase();
-      if (!emailRaw) {
-        return res.status(400).json({ error: 'Google account must provide a verified email address.' });
-      }
+    const authHeader = req.headers.authorization;
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      return res.status(401).json({ error: 'Firebase ID token is required.' });
+    }
+    const idToken = authHeader.slice(7).trim();
 
+    let decoded: { uid: string; email: string; name?: string; picture?: string };
+    try {
+      decoded = await verifyFirebaseTokenWithFallback(idToken);
+    } catch (error) {
+      console.error('firebase token verification error:', error);
+      return res.status(401).json({ error: 'Google sign-in token could not be verified. Please try signing in again.' });
+    }
+
+    const emailRaw = decoded.email;
+    if (!emailRaw) {
+      return res.status(400).json({ error: 'Google account must provide a verified email address.' });
+    }
+
+    try {
+      await ensureDatabaseSchema(database);
       const emailH = hashEmail(emailRaw);
       const deviceName = typeof req.body?.deviceName === 'string' ? req.body.deviceName.slice(0, 80) : 'Web Browser';
       const platform = typeof req.body?.platform === 'string' ? req.body.platform.slice(0, 40) : 'Web';
@@ -315,13 +403,14 @@ export function createAuthRouter(database: PgDatabase) {
         user: { ...user, maskedEmail: masked, createdAt: nowIso },
       });
     } catch (error) {
-      console.error('firebase auth error:', error);
-      return res.status(401).json({ error: 'Google sign-in verification failed.' });
+      console.error('firebase auth database error:', error);
+      return handleAuthDbError(res, error, 'Could not complete Google sign-in on server.');
     }
   });
 
   router.post('/instant', instantLimiter, async (req, res) => {
     try {
+      await ensureDatabaseSchema(database);
       const deviceName = typeof req.body?.deviceName === 'string' ? req.body.deviceName.slice(0, 80) : 'Web Browser';
       const platform = typeof req.body?.platform === 'string' ? req.body.platform.slice(0, 40) : 'Web';
       const keys = req.body?.keys as
@@ -426,12 +515,13 @@ export function createAuthRouter(database: PgDatabase) {
       });
     } catch (error) {
       console.error('instant pass error:', error);
-      return res.status(500).json({ error: 'Could not start instant session.' });
+      return handleAuthDbError(res, error, 'Could not start instant session.');
     }
   });
 
   router.post('/access-key', loginLimiter, async (req, res) => {
     try {
+      await ensureDatabaseSchema(database);
       const accessKey = typeof req.body?.accessKey === 'string' ? req.body.accessKey.trim() : '';
       const deviceName = typeof req.body?.deviceName === 'string' ? req.body.deviceName.slice(0, 80) : 'Web Browser';
       const platform = typeof req.body?.platform === 'string' ? req.body.platform.slice(0, 40) : 'Web';
@@ -493,7 +583,7 @@ export function createAuthRouter(database: PgDatabase) {
       });
     } catch (error) {
       console.error('access-key login error:', error);
-      return res.status(500).json({ error: 'Access Key sign-in failed.' });
+      return handleAuthDbError(res, error, 'Access Key sign-in failed.');
     }
   });
 

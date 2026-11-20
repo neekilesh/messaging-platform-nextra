@@ -11,6 +11,7 @@ import {
 import { signInWithPopup } from 'firebase/auth';
 import { auth, googleAuthProvider } from '../../lib/firebase';
 import { NexoraLogo } from '../ui/NexoraLogo';
+import { PWAInstallButton } from '../ui/PWAInstallButton';
 import { apiRequest, setStoredToken } from '../../lib/api';
 import {
   generateIdentityKeyPair,
@@ -243,6 +244,7 @@ export function AuthFlow({ onAuthenticated }: AuthFlowProps) {
                 <span aria-hidden="true">·</span>
                 <span>25-member encrypted groups</span>
               </div>
+              <PWAInstallButton />
             </div>
 
             <div className="nexora-glass rounded-2xl p-6 sm:p-8 space-y-5">

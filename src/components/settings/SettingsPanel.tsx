@@ -23,6 +23,7 @@ import type { StoredLocalKeyBundle } from '../../lib/crypto';
 import { NEXORA_THEMES, useVisualPrefs } from '../../lib/theme';
 import type { AuthUser, DeviceSession, PrivacySettings, PublicUser } from '../../types/nexora';
 import { Avatar } from '../ui/Avatar';
+import { PWAInstallButton } from '../ui/PWAInstallButton';
 
 interface SettingsPanelProps {
   user: AuthUser;
@@ -154,14 +155,17 @@ export function SettingsPanel({ user, myKeys, onUserUpdated, onLogout }: Setting
           </p>
         </div>
 
-        <button
-          type="button"
-          onClick={onLogout}
-          className="h-9 px-4 rounded-xl bg-rose-500/15 hover:bg-rose-500/25 border border-rose-500/30 text-rose-200 text-xs font-medium inline-flex items-center gap-1.5 self-start cursor-pointer"
-        >
-          <LogOut className="w-3.5 h-3.5" />
-          <span>Sign Out</span>
-        </button>
+        <div className="flex items-center gap-2 self-start">
+          <PWAInstallButton />
+          <button
+            type="button"
+            onClick={onLogout}
+            className="h-9 px-4 rounded-xl bg-rose-500/15 hover:bg-rose-500/25 border border-rose-500/30 text-rose-200 text-xs font-medium inline-flex items-center gap-1.5 cursor-pointer"
+          >
+            <LogOut className="w-3.5 h-3.5" />
+            <span>Sign Out</span>
+          </button>
+        </div>
       </div>
 
       <div className="flex flex-wrap gap-1.5 p-1 bg-slate-900/80 rounded-xl border border-white/10">

@@ -1,15 +1,94 @@
-
 import tailwindcss from '@tailwindcss/vite';
 import react from '@vitejs/plugin-react';
-import fs from 'fs';
-import path from 'path';
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { defineConfig } from 'vite';
+import { VitePWA } from 'vite-plugin-pwa';
+
+const rootDir = fileURLToPath(new URL('.', import.meta.url));
 
 export default defineConfig(() => {
+  const hmrDisabled = process.env.DISABLE_HMR === 'true';
+
   return {
     plugins: [
       react(),
       tailwindcss(),
+      VitePWA({
+        registerType: 'autoUpdate',
+        includeAssets: ['icon.svg', 'apple-touch-icon.png'],
+        manifest: {
+          id: '/',
+          name: 'NEXORA — Private E2EE Messaging',
+          short_name: 'NEXORA',
+          description:
+            'End-to-end encrypted messaging with private chats, 25-member groups, voice notes, 24-hour stories, and streaks.',
+          theme_color: '#070913',
+          background_color: '#070913',
+          display: 'standalone',
+          start_url: '/',
+          scope: '/',
+          icons: [
+            {
+              src: '/pwa-192x192.png',
+              sizes: '192x192',
+              type: 'image/png',
+              purpose: 'any',
+            },
+            {
+              src: '/pwa-512x512.png',
+              sizes: '512x512',
+              type: 'image/png',
+              purpose: 'any',
+            },
+            {
+              src: '/pwa-maskable-512x512.png',
+              sizes: '512x512',
+              type: 'image/png',
+              purpose: 'maskable',
+            },
+          ],
+        },
+        workbox: {
+          globPatterns: ['**/*.{js,css,html,ico,png,svg,woff,woff2}'],
+          navigateFallbackDenylist: [/^\/api\//, /^\/socket\.io\//],
+          runtimeCaching: [
+            {
+              urlPattern: /^https:\/\/fonts\.googleapis\.com\/.*/i,
+              handler: 'CacheFirst',
+              options: {
+                cacheName: 'google-fonts-cache',
+                expiration: {
+                  maxEntries: 10,
+                  maxAgeSeconds: 60 * 60 * 24 * 365,
+                },
+                cacheableResponse: {
+                  statuses: [0, 200],
+                },
+              },
+            },
+            {
+              urlPattern: /^https:\/\/fonts\.gstatic\.com\/.*/i,
+              handler: 'CacheFirst',
+              options: {
+                cacheName: 'gstatic-fonts-cache',
+                expiration: {
+                  maxEntries: 10,
+                  maxAgeSeconds: 60 * 60 * 24 * 365,
+                },
+                cacheableResponse: {
+                  statuses: [0, 200],
+                },
+              },
+            },
+          ],
+        },
+        devOptions: {
+          enabled: true,
+          type: 'module',
+        },
+      }),
       {
         name: 'copy-unbundled-src-assets',
         apply: 'build',
@@ -17,8 +96,8 @@ export default defineConfig(() => {
           if (error) {
             return;
           }
-          const distDir = path.resolve(__dirname, 'dist');
-          const srcAssets = path.resolve(__dirname, 'src/assets');
+          const distDir = path.resolve(rootDir, 'dist');
+          const srcAssets = path.resolve(rootDir, 'src/assets');
           const distAssets = path.resolve(distDir, 'src/assets');
 
           if (fs.existsSync(distDir) && fs.existsSync(srcAssets)) {
@@ -33,7 +112,7 @@ export default defineConfig(() => {
 
     resolve: {
       alias: {
-        '@': path.resolve(__dirname, '.'),
+        '@': rootDir,
       },
     },
 
@@ -42,10 +121,11 @@ export default defineConfig(() => {
       allowedHosts: true as const,
 
       // HMR is disabled in AI Studio via DISABLE_HMR env var.
-      hmr: process.env.DISABLE_HMR !== 'true',
+      hmr: !hmrDisabled,
+      ...(hmrDisabled ? { ws: false as const } : {}),
 
       // Disable file watching when DISABLE_HMR is true.
-      watch: process.env.DISABLE_HMR === 'true' ? null : {},
+      watch: hmrDisabled ? null : {},
     },
 
     preview: {
@@ -53,4 +133,3 @@ export default defineConfig(() => {
     },
   };
 });
-
