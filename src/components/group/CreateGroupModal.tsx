@@ -1,9 +1,10 @@
 import React, { useState } from 'react';
 import { Check, Search, Upload, Users, X } from 'lucide-react';
+import { audioManager } from '../../audio/AudioManager';
 import { apiRequest } from '../../lib/api';
 import { createGroupEpochEnvelopes, type StoredLocalKeyBundle } from '../../lib/crypto';
 import type { PublicUser } from '../../types/nexora';
-import { Avatar } from '../ui/Avatar';
+import { GlassButton, GlassInput, GlassModal, ProfileAvatar } from '../ui/LiquidGlass';
 
 interface CreateGroupModalProps {
   currentUserId: string;
@@ -32,7 +33,7 @@ export function CreateGroupModal({
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const totalMemberCount = selectedMembers.length + 1; // +1 includes creator
+  const totalMemberCount = selectedMembers.length + 1;
 
   const handleSearch = async (q: string) => {
     setSearchQuery(q);
@@ -53,6 +54,7 @@ export function CreateGroupModal({
 
   const toggleMember = (user: PublicUser) => {
     setError(null);
+    audioManager.play('ui.glass_touch');
     const exists = selectedMembers.some((m) => m.id === user.id);
     if (exists) {
       setSelectedMembers((prev) => prev.filter((m) => m.id !== user.id));
@@ -121,25 +123,25 @@ export function CreateGroupModal({
   const poolUsers = searchQuery.trim() ? searchResults : friends;
 
   return (
-    <div className="fixed inset-0 z-50 bg-black/75 backdrop-blur-sm flex items-center justify-center p-4" onClick={onClose}>
-      <div
-        className="w-full max-w-lg nexora-glass rounded-2xl p-6 space-y-5 max-h-[90vh] flex flex-col"
-        onClick={(e) => e.stopPropagation()}
-      >
-        <div className="flex items-center justify-between">
+    <GlassModal onClose={onClose} maxWidthClass="max-w-lg">
+      <div className="max-h-[82vh] flex flex-col space-y-4">
+        <div className="flex items-center justify-between gap-3">
           <div className="flex items-center gap-2.5">
-            <Users className="w-5 h-5 text-violet-400" />
-            <h3 className="text-lg font-display font-semibold text-white">Create Encrypted Group</h3>
+            <Users className="w-5 h-5 text-violet-600 dark:text-violet-300" />
+            <h3 className="text-lg font-display font-semibold text-[var(--nx-text-primary)]">Create Encrypted Group</h3>
           </div>
-          <div className="flex items-center gap-3">
-            <span className="font-mono-tabular text-xs text-cyan-300">
+          <div className="flex items-center gap-2">
+            <span className="font-mono-tabular text-xs text-sky-600 dark:text-sky-300">
               {totalMemberCount}/{MAX_MEMBERS} members
             </span>
             <button
               type="button"
-              onClick={onClose}
+              onClick={() => {
+                audioManager.play('ui.glass_close');
+                onClose();
+              }}
               aria-label="Close modal"
-              className="p-2 text-slate-400 hover:text-white cursor-pointer"
+              className="min-h-[40px] min-w-[40px] rounded-full hover:bg-[var(--nx-surface-hover)] text-[var(--nx-text-secondary)] hover:text-[var(--nx-text-primary)] flex items-center justify-center transition-colors cursor-pointer"
             >
               <X className="w-4 h-4" />
             </button>
@@ -147,7 +149,7 @@ export function CreateGroupModal({
         </div>
 
         {error && (
-          <div className="rounded-xl bg-rose-500/10 border border-rose-500/30 px-3.5 py-2.5 text-xs text-rose-200">
+          <div className="rounded-[16px] bg-rose-500/12 border border-rose-500/30 px-3.5 py-2.5 text-xs text-rose-700 dark:text-rose-200">
             {error}
           </div>
         )}
@@ -156,52 +158,61 @@ export function CreateGroupModal({
           <div className="flex items-center gap-4">
             <label className="cursor-pointer shrink-0">
               {avatarUrl ? (
-                <img src={avatarUrl} alt="Group avatar" className="w-14 h-14 rounded-full object-cover border border-white/15" />
+                <img src={avatarUrl} alt="Group avatar" className="w-14 h-14 rounded-full object-cover border border-white/40 dark:border-white/20" />
               ) : (
-                <div className="w-14 h-14 rounded-full bg-slate-900 border border-dashed border-slate-600 flex items-center justify-center text-slate-400 hover:border-violet-400 transition-colors">
+                <div className="w-14 h-14 rounded-full bg-white/45 dark:bg-white/[0.06] border border-dashed border-slate-400/50 dark:border-white/25 flex items-center justify-center text-[var(--nx-text-secondary)] hover:border-violet-500 transition-colors">
                   <Upload className="w-4 h-4" />
                 </div>
               )}
               <input type="file" accept="image/*" onChange={handleAvatar} className="hidden" />
             </label>
             <div className="flex-1 space-y-2">
-              <input
+              <GlassInput
                 type="text"
                 required
                 maxLength={60}
                 value={name}
                 onChange={(e) => setName(e.target.value)}
                 placeholder="Group name"
-                className="w-full h-10 px-3.5 rounded-xl bg-slate-900/80 border border-white/10 text-sm text-white placeholder:text-slate-500 focus:outline-none focus:border-violet-500"
               />
-              <input
+              <GlassInput
                 type="text"
                 maxLength={240}
                 value={description}
                 onChange={(e) => setDescription(e.target.value)}
                 placeholder="Group description (optional)"
-                className="w-full h-9 px-3.5 rounded-xl bg-slate-900/80 border border-white/10 text-xs text-white placeholder:text-slate-500 focus:outline-none focus:border-violet-500"
+                className="h-9 text-xs"
               />
             </div>
           </div>
 
           <div className="flex items-center justify-between gap-2 text-xs">
-            <span className="text-slate-400">Group Privacy</span>
-            <div className="flex items-center gap-1 p-1 bg-slate-900/80 rounded-lg border border-white/10">
+            <span className="text-[var(--nx-text-secondary)]">Group Privacy</span>
+            <div className="flex items-center gap-1 p-1 nexora-glass-subtle rounded-[14px]">
               <button
                 type="button"
-                onClick={() => setPrivacy('private')}
-                className={`px-3 py-1 rounded-md transition-colors cursor-pointer ${
-                  privacy === 'private' ? 'bg-violet-600 text-white' : 'text-slate-400 hover:text-white'
+                onClick={() => {
+                  audioManager.play('ui.tab_switch');
+                  setPrivacy('private');
+                }}
+                className={`px-3 py-1 rounded-[10px] transition-colors cursor-pointer ${
+                  privacy === 'private'
+                    ? 'bg-white/80 dark:bg-white/[0.16] text-slate-900 dark:text-white shadow-sm'
+                    : 'text-[var(--nx-text-secondary)] hover:text-[var(--nx-text-primary)]'
                 }`}
               >
                 Private
               </button>
               <button
                 type="button"
-                onClick={() => setPrivacy('invite_only')}
-                className={`px-3 py-1 rounded-md transition-colors cursor-pointer ${
-                  privacy === 'invite_only' ? 'bg-violet-600 text-white' : 'text-slate-400 hover:text-white'
+                onClick={() => {
+                  audioManager.play('ui.tab_switch');
+                  setPrivacy('invite_only');
+                }}
+                className={`px-3 py-1 rounded-[10px] transition-colors cursor-pointer ${
+                  privacy === 'invite_only'
+                    ? 'bg-white/80 dark:bg-white/[0.16] text-slate-900 dark:text-white shadow-sm'
+                    : 'text-[var(--nx-text-secondary)] hover:text-[var(--nx-text-primary)]'
                 }`}
               >
                 Invite Only
@@ -210,16 +221,13 @@ export function CreateGroupModal({
           </div>
 
           <div className="space-y-2">
-            <div className="relative">
-              <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
-              <input
-                type="text"
-                value={searchQuery}
-                onChange={(e) => handleSearch(e.target.value)}
-                placeholder="Add members by @username"
-                className="w-full h-10 pl-9 pr-3.5 rounded-xl bg-slate-900/80 border border-white/10 text-sm text-white placeholder:text-slate-500 focus:outline-none focus:border-violet-500"
-              />
-            </div>
+            <GlassInput
+              type="text"
+              value={searchQuery}
+              onChange={(e) => handleSearch(e.target.value)}
+              placeholder="Add members by @username"
+              leadingIcon={<Search className="w-4 h-4" />}
+            />
 
             {selectedMembers.length > 0 && (
               <div className="flex flex-wrap gap-1.5 pt-1">
@@ -228,7 +236,7 @@ export function CreateGroupModal({
                     key={m.id}
                     type="button"
                     onClick={() => toggleMember(m)}
-                    className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-violet-600/25 border border-violet-500/40 text-xs text-violet-100 hover:bg-violet-600/40 cursor-pointer"
+                    className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-violet-500/20 border border-violet-500/40 dark:border-violet-300/35 text-xs text-violet-800 dark:text-violet-100 hover:bg-violet-500/35 cursor-pointer"
                   >
                     <span>@{m.username}</span>
                     <X className="w-3 h-3" />
@@ -239,7 +247,7 @@ export function CreateGroupModal({
 
             <div className="max-h-48 overflow-y-auto space-y-1 pt-1">
               {poolUsers.length === 0 ? (
-                <div className="text-xs text-slate-500 py-4 text-center">
+                <div className="text-xs text-[var(--nx-text-secondary)] py-4 text-center">
                   {searchQuery ? 'No matching users found.' : 'Search @username above or add friends first.'}
                 </div>
               ) : (
@@ -250,16 +258,18 @@ export function CreateGroupModal({
                       key={u.id}
                       type="button"
                       onClick={() => toggleMember(u)}
-                      className={`w-full flex items-center gap-3 p-2 rounded-xl transition-colors text-left cursor-pointer ${
-                        selected ? 'bg-violet-600/20 border border-violet-500/35' : 'hover:bg-white/5 border border-transparent'
+                      className={`w-full flex items-center gap-3 p-2.5 rounded-[16px] transition-colors text-left cursor-pointer border ${
+                        selected
+                          ? 'bg-violet-500/18 border-violet-500/45 dark:border-violet-300/35'
+                          : 'hover:bg-[var(--nx-surface-hover)] border-transparent'
                       }`}
                     >
-                      <Avatar src={u.avatarUrl} name={u.displayName} size="sm" isOnline={u.isOnline} />
+                      <ProfileAvatar src={u.avatarUrl} name={u.displayName} size="sm" isOnline={u.isOnline} />
                       <div className="min-w-0 flex-1">
-                        <div className="text-sm font-medium text-white truncate">{u.displayName}</div>
-                        <div className="text-xs text-slate-400 truncate">@{u.username}</div>
+                        <div className="text-sm font-medium text-[var(--nx-text-primary)] truncate">{u.displayName}</div>
+                        <div className="text-xs text-[var(--nx-text-secondary)] truncate">@{u.username}</div>
                       </div>
-                      {selected && <Check className="w-4 h-4 text-cyan-400 shrink-0" />}
+                      {selected && <Check className="w-4 h-4 text-violet-600 dark:text-sky-300 shrink-0" />}
                     </button>
                   );
                 })
@@ -267,15 +277,18 @@ export function CreateGroupModal({
             </div>
           </div>
 
-          <button
+          <GlassButton
             type="submit"
+            variant="primary"
+            size="lg"
+            soundEvent={false}
             disabled={loading}
-            className="w-full h-11 rounded-xl bg-violet-600 hover:bg-violet-500 disabled:opacity-50 text-white font-medium text-sm transition-colors cursor-pointer"
+            className="w-full"
           >
             {loading ? 'Establishing Group Epoch Keys...' : 'Create Group'}
-          </button>
+          </GlassButton>
         </form>
       </div>
-    </div>
+    </GlassModal>
   );
 }

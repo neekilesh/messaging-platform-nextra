@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { motion } from 'motion/react';
 import { Pause, Play } from 'lucide-react';
-import { playSound } from '../../lib/sound';
+import { audioManager } from '../../audio/AudioManager';
 import { useVisualPrefs } from '../../lib/theme';
 
 interface VoicePlayerProps {
@@ -39,6 +39,7 @@ export function VoicePlayer({ audioUrl, durationMs, waveform, isMine }: VoicePla
       setProgress(Math.min(1, audio.currentTime / Math.max(0.1, dur)));
     };
     audio.onended = () => {
+      audioManager.play('voice.play_end');
       setPlaying(false);
       setProgress(0);
       setCurrentSec(0);
@@ -57,7 +58,7 @@ export function VoicePlayer({ audioUrl, durationMs, waveform, isMine }: VoicePla
       audio.pause();
       setPlaying(false);
     } else {
-      playSound('voice.play_start');
+      audioManager.play('voice.play_start');
       audio.playbackRate = SPEEDS[speedIdx];
       await audio.play();
       setPlaying(true);
@@ -104,8 +105,8 @@ export function VoicePlayer({ audioUrl, durationMs, waveform, isMine }: VoicePla
           aria-label={playing ? 'Pause voice message' : 'Play voice message'}
           className={`relative z-10 w-9 h-9 rounded-full flex items-center justify-center transition-colors cursor-pointer ${
             isMine
-              ? 'bg-white/20 hover:bg-white/30 text-white'
-              : 'bg-violet-600/35 hover:bg-violet-600/55 text-cyan-200'
+              ? 'bg-white/25 hover:bg-white/35 text-white'
+              : 'bg-violet-600/20 hover:bg-violet-600/35 dark:bg-violet-600/35 dark:hover:bg-violet-600/55 text-violet-700 dark:text-cyan-200'
           }`}
         >
           {playing ? <Pause className="w-4 h-4" /> : <Play className="w-4 h-4 ml-0.5" />}
@@ -136,17 +137,17 @@ export function VoicePlayer({ audioUrl, durationMs, waveform, isMine }: VoicePla
                   active
                     ? isMine
                       ? 'bg-cyan-300 shadow-[0_0_6px_rgba(34,211,238,0.6)]'
-                      : 'bg-violet-400 shadow-[0_0_6px_rgba(167,139,250,0.55)]'
+                      : 'bg-violet-600 dark:bg-violet-400'
                     : isMine
-                    ? 'bg-white/30'
-                    : 'bg-slate-600/70'
+                    ? 'bg-white/35'
+                    : 'bg-slate-400/50 dark:bg-slate-600/70'
                 }`}
                 style={{ height: `${Math.max(22, Math.round(val * 100))}%` }}
               />
             );
           })}
         </div>
-        <div className="flex items-center justify-between text-[11px] font-mono-tabular opacity-80">
+        <div className="flex items-center justify-between text-[11px] font-mono-tabular opacity-85">
           <span>{playing ? fmt(currentSec) : fmt(totalSec)}</span>
           <button
             type="button"

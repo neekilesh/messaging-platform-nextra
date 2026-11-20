@@ -1,8 +1,8 @@
 import React, { useEffect, useState } from 'react';
-import { motion } from 'motion/react';
-import { Check, ShieldCheck, X } from 'lucide-react';
+import { Check, ShieldCheck } from 'lucide-react';
 import { computeSafetyNumber } from '../../lib/crypto';
 import type { PublicUser } from '../../types/nexora';
+import { GlassButton, GlassModal } from '../ui/LiquidGlass';
 import { acceptUpdatedFingerprint } from '../ui/MagicalEffects';
 
 interface SafetyNumberModalProps {
@@ -34,53 +34,41 @@ export function SafetyNumberModal({ myPublicJwk, peer, onClose }: SafetyNumberMo
   };
 
   return (
-    <div className="fixed inset-0 z-50 bg-black/75 backdrop-blur-sm flex items-center justify-center p-4" onClick={onClose}>
-      <motion.div
-        initial={{ opacity: 0, scale: 0.94 }}
-        animate={{ opacity: 1, scale: 1 }}
-        transition={{ type: 'spring', stiffness: 360, damping: 28 }}
-        className="w-full max-w-md nexora-glass rounded-2xl p-6 space-y-5 border border-cyan-400/25 shadow-[0_0_40px_rgba(34,211,238,0.12)]"
-        onClick={(e) => e.stopPropagation()}
-      >
-        <div className="flex items-center justify-between">
-          <div className="flex items-center gap-2.5">
-            <ShieldCheck className="w-5 h-5 text-cyan-400" />
-            <h3 className="text-lg font-display font-semibold text-white">Verify End-to-End Encryption</h3>
-          </div>
-          <button
-            type="button"
-            onClick={onClose}
-            aria-label="Close safety verification"
-            className="p-2 text-slate-400 hover:text-white cursor-pointer"
-          >
-            <X className="w-4 h-4" />
-          </button>
+    <GlassModal title="Verify End-to-End Encryption" onClose={onClose} maxWidthClass="max-w-md">
+      <div className="flex items-center gap-2 text-xs text-sky-600 dark:text-sky-300 -mt-2">
+        <ShieldCheck className="w-4 h-4 shrink-0" />
+        <span>Cryptographic identity check with @{peer.username}</span>
+      </div>
+
+      <p className="text-sm text-[var(--nx-text-secondary)] leading-relaxed">
+        Compare this 30-digit safety number with <span className="text-[var(--nx-text-primary)] font-semibold">@{peer.username}</span>. If the numbers match identically on both devices, your private conversation keys are verified.
+      </p>
+
+      <div className="rounded-[18px] bg-sky-500/10 dark:bg-black/45 border border-sky-500/35 dark:border-sky-400/25 p-4 text-center font-mono-tabular text-lg tracking-wider text-sky-700 dark:text-sky-300 leading-relaxed">
+        {safetyNumber}
+      </div>
+
+      <div className="text-xs text-[var(--nx-text-secondary)] space-y-1">
+        <div>Algorithm: ECDH P-256 · HKDF-SHA256 · AES-256-GCM</div>
+        <div>
+          Peer Key Fingerprint:{' '}
+          <span className="font-mono-tabular text-[var(--nx-text-primary)]">{peer.fingerprint || 'N/A'}</span>
         </div>
+      </div>
 
-        <p className="text-sm text-slate-300 leading-relaxed">
-          Compare this 30-digit cryptographic safety number with <span className="text-white font-medium">@{peer.username}</span>. If the numbers match identically on both devices, your private conversation keys are verified.
-        </p>
-
-        <div className="rounded-xl bg-slate-950/80 border border-cyan-400/20 p-4 text-center font-mono-tabular text-lg tracking-wider text-cyan-300 leading-relaxed shadow-[inset_0_0_24px_rgba(34,211,238,0.06)]">
-          {safetyNumber}
-        </div>
-
-        <div className="text-xs text-slate-400 space-y-1">
-          <div>Algorithm: ECDH P-256 · HKDF-SHA256 · AES-256-GCM</div>
-          <div>Peer Key Fingerprint: <span className="font-mono-tabular text-slate-300">{peer.fingerprint || 'N/A'}</span></div>
-        </div>
-
-        {peer.fingerprint && (
-          <button
-            type="button"
-            onClick={handleConfirmMatch}
-            className="w-full h-10 rounded-xl bg-cyan-500/15 hover:bg-cyan-500/25 border border-cyan-400/35 text-cyan-200 text-xs font-medium inline-flex items-center justify-center gap-2 transition-colors cursor-pointer"
-          >
-            <Check className="w-4 h-4" />
-            <span>{confirmed ? 'Fingerprint Confirmed' : 'Mark Identity Key Verified'}</span>
-          </button>
-        )}
-      </motion.div>
-    </div>
+      {peer.fingerprint && (
+        <GlassButton
+          type="button"
+          variant="primary"
+          size="md"
+          soundEvent="ui.settings_saved"
+          onClick={handleConfirmMatch}
+          className="w-full"
+        >
+          <Check className="w-4 h-4" />
+          <span>{confirmed ? 'Fingerprint Confirmed' : 'Mark Identity Key Verified'}</span>
+        </GlassButton>
+      )}
+    </GlassModal>
   );
 }

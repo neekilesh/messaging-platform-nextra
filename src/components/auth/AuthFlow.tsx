@@ -9,7 +9,9 @@ import {
   Zap,
 } from 'lucide-react';
 import { signInWithPopup } from 'firebase/auth';
-import { auth, googleAuthProvider } from '../../lib/firebase';
+import { auth, firebaseProjectId, googleAuthProvider } from '../../lib/firebase';
+import { CosmicBackdrop } from '../ui/CosmicBackdrop';
+import { GlassButton, GlassCard, GlassInput } from '../ui/LiquidGlass';
 import { NexoraLogo } from '../ui/NexoraLogo';
 import { PWAInstallButton } from '../ui/PWAInstallButton';
 import { apiRequest, setStoredToken } from '../../lib/api';
@@ -34,10 +36,11 @@ export function AuthFlow({ onAuthenticated }: AuthFlowProps) {
   const [keyLoading, setKeyLoading] = useState(false);
   const [accessKeyInput, setAccessKeyInput] = useState('');
   const [error, setError] = useState<string | null>(null);
+  const [unauthorizedHost, setUnauthorizedHost] = useState<string | null>(null);
 
   useEffect(() => {
     if (screen === 'splash') {
-      const t = setTimeout(() => setScreen('welcome'), 1200);
+      const t = setTimeout(() => setScreen('welcome'), 1000);
       return () => clearTimeout(t);
     }
   }, [screen]);
@@ -49,6 +52,7 @@ export function AuthFlow({ onAuthenticated }: AuthFlowProps) {
 
   const handleGoogleSignIn = async () => {
     setError(null);
+    setUnauthorizedHost(null);
     setGoogleLoading(true);
     try {
       const cred = await signInWithPopup(auth, googleAuthProvider);
@@ -96,7 +100,19 @@ export function AuthFlow({ onAuthenticated }: AuthFlowProps) {
       onAuthenticated(res.user, bundle);
     } catch (err) {
       const code = (err as { code?: string })?.code;
-      if (code !== 'auth/popup-closed-by-user' && code !== 'auth/cancelled-popup-request') {
+      if (code === 'auth/unauthorized-domain') {
+        const host = typeof window !== 'undefined' ? window.location.hostname : '';
+        setUnauthorizedHost(host);
+        setError(
+          `Google Sign-In is blocked on this domain (${host}) because it is not listed under Firebase Authorized Domains for project "${firebaseProjectId}". Add this domain in Firebase Console → Authentication → Settings → Authorized domains, or use Instant Device Pass below.`
+        );
+      } else if (code === 'auth/popup-blocked') {
+        setError('Your browser blocked the Google sign-in popup. Please allow popups for this site and try again, or use Instant Device Pass.');
+      } else if (code === 'auth/operation-not-allowed') {
+        setError(
+          `Google Sign-In is not enabled in Firebase project "${firebaseProjectId}". Enable Google under Authentication → Sign-in method in Firebase Console.`
+        );
+      } else if (code !== 'auth/popup-closed-by-user' && code !== 'auth/cancelled-popup-request') {
         setError(err instanceof Error ? err.message : 'Google sign-in failed.');
       }
     } finally {
@@ -106,6 +122,7 @@ export function AuthFlow({ onAuthenticated }: AuthFlowProps) {
 
   const handleInstantPass = async () => {
     setError(null);
+    setUnauthorizedHost(null);
     setInstantLoading(true);
     try {
       const rawKeys = await generateIdentityKeyPair();
@@ -195,22 +212,24 @@ export function AuthFlow({ onAuthenticated }: AuthFlowProps) {
 
   return (
     <div className="min-h-screen w-full nexora-cosmos flex items-center justify-center p-4 sm:p-8 relative overflow-hidden">
+      <CosmicBackdrop />
+
       <AnimatePresence mode="wait">
         {screen === 'splash' && (
           <motion.div
             key="splash"
             initial={{ opacity: 0, scale: 0.94 }}
             animate={{ opacity: 1, scale: 1 }}
-            exit={{ opacity: 0, scale: 1.04 }}
-            transition={{ duration: 0.45, ease: [0.16, 1, 0.3, 1] }}
-            className="flex flex-col items-center text-center gap-5"
+            exit={{ opacity: 0, scale: 1.03 }}
+            transition={{ duration: 0.4, ease: [0.16, 1, 0.3, 1] }}
+            className="relative z-10 flex flex-col items-center text-center gap-5"
           >
             <NexoraLogo size={76} />
             <div>
-              <h1 className="text-3xl sm:text-4xl font-display font-bold tracking-tight text-white">
+              <h1 className="text-3xl sm:text-4xl font-display font-bold tracking-tight text-[var(--nx-text-primary)]">
                 NEXORA
               </h1>
-              <p className="text-sm text-slate-400 mt-1.5">
+              <p className="text-sm text-[var(--nx-text-secondary)] mt-1.5">
                 Zero-form entry. End-to-end encrypted messaging.
               </p>
             </div>
@@ -223,21 +242,23 @@ export function AuthFlow({ onAuthenticated }: AuthFlowProps) {
             initial={{ opacity: 0, y: 14 }}
             animate={{ opacity: 1, y: 0 }}
             exit={{ opacity: 0, y: -10 }}
-            transition={{ duration: 0.3, ease: [0.16, 1, 0.3, 1] }}
-            className="w-full max-w-4xl grid grid-cols-1 lg:grid-cols-2 gap-8 items-center"
+            transition={{ duration: 0.28, ease: [0.16, 1, 0.3, 1] }}
+            className="relative z-10 w-full max-w-4xl grid grid-cols-1 lg:grid-cols-2 gap-8 items-center"
           >
             <div className="space-y-6">
               <div className="flex items-center gap-3">
                 <NexoraLogo size={42} />
-                <span className="text-2xl font-display font-bold tracking-tight text-white">NEXORA</span>
+                <span className="text-2xl font-display font-bold tracking-tight text-[var(--nx-text-primary)]">
+                  NEXORA
+                </span>
               </div>
-              <h1 className="text-3xl sm:text-5xl font-display font-bold tracking-tight text-white leading-[1.1]">
-                Private connections, no sign-up forms.
+              <h1 className="text-3xl sm:text-5xl font-display font-bold tracking-tight text-[var(--nx-text-primary)] leading-[1.08]">
+                Private connections, effortless clarity.
               </h1>
-              <p className="text-base text-slate-300 leading-relaxed max-w-md">
-                Enter immediately with Google or a one-click Instant Device Pass. Your handle and ECDH P-256 device keys are provisioned automatically — zero registration forms, zero email codes.
+              <p className="text-base text-[var(--nx-text-secondary)] leading-relaxed max-w-md">
+                Enter immediately with Google or a one-click Instant Device Pass. Your @handle and ECDH P-256 device keys are provisioned automatically.
               </p>
-              <div className="flex flex-wrap items-center gap-2 text-xs text-slate-400">
+              <div className="flex flex-wrap items-center gap-2 text-xs text-[var(--nx-text-muted)]">
                 <span>1-click Google Sign-In</span>
                 <span aria-hidden="true">·</span>
                 <span>Instant Device Pass</span>
@@ -247,75 +268,91 @@ export function AuthFlow({ onAuthenticated }: AuthFlowProps) {
               <PWAInstallButton />
             </div>
 
-            <div className="nexora-glass rounded-2xl p-6 sm:p-8 space-y-5">
-              <div className="space-y-1.5">
-                <h2 className="text-xl font-display font-semibold text-white">Enter NEXORA</h2>
-                <p className="text-sm text-slate-400">
-                  Choose Google or start an Instant Device Pass right away. You can customize your @handle anytime inside Settings.
+            <GlassCard intensity="elevated" padding="lg" className="space-y-5 rounded-[28px] sm:p-8">
+              <div className="relative z-10 space-y-1.5">
+                <h2 className="text-xl font-display font-semibold text-[var(--nx-text-primary)]">
+                  Enter NEXORA
+                </h2>
+                <p className="text-sm text-[var(--nx-text-secondary)]">
+                  Choose Google or start an Instant Device Pass right away. You can customize your @handle anytime inside Profile.
                 </p>
               </div>
 
               {error && (
-                <div className="rounded-xl bg-rose-500/10 border border-rose-500/30 px-4 py-3 text-sm text-rose-200">
-                  {error}
+                <div className="relative z-10 rounded-[18px] bg-rose-500/12 border border-rose-500/35 dark:border-rose-400/30 px-4 py-3 text-sm text-rose-700 dark:text-rose-200 space-y-2">
+                  <p>{error}</p>
+                  {unauthorizedHost && (
+                    <div className="rounded-[14px] bg-white/60 dark:bg-black/45 border border-rose-500/25 dark:border-rose-400/20 px-3 py-2 text-xs text-[var(--nx-text-secondary)] space-y-1">
+                      <div className="font-medium text-rose-700 dark:text-rose-200">Domain to authorize:</div>
+                      <code className="block break-all font-mono-tabular text-sky-700 dark:text-sky-300 select-all">
+                        {unauthorizedHost}
+                      </code>
+                    </div>
+                  )}
                 </div>
               )}
 
-              <div className="space-y-3">
+              <div className="relative z-10 space-y-3">
                 <button
                   type="button"
                   disabled={busy}
                   onClick={handleGoogleSignIn}
-                  className="w-full h-12 rounded-xl bg-white/95 hover:bg-white disabled:opacity-60 text-slate-900 font-medium text-sm flex items-center justify-center gap-2.5 transition-colors cursor-pointer"
+                  className="w-full h-12 rounded-[18px] bg-white/95 hover:bg-white disabled:opacity-60 text-slate-900 font-medium text-sm flex items-center justify-center gap-2.5 transition-all active:scale-[0.98] cursor-pointer border border-white/80 shadow-[0_8px_22px_rgba(30,24,70,0.12)]"
                 >
                   <GoogleIcon />
                   <span>{googleLoading ? 'Connecting Google...' : 'Continue with Google'}</span>
                 </button>
 
-                <button
+                <GlassButton
                   type="button"
+                  variant="primary"
+                  size="lg"
                   disabled={busy}
                   onClick={handleInstantPass}
-                  className="w-full h-12 rounded-xl bg-violet-600 hover:bg-violet-500 disabled:opacity-60 text-white font-medium text-sm flex items-center justify-center gap-2 transition-colors cursor-pointer shadow-[0_0_24px_rgba(124,58,237,0.3)]"
+                  className="w-full"
                 >
-                  <Zap className="w-4 h-4 text-cyan-300" />
+                  <Zap className="w-4 h-4 text-sky-200" />
                   <span>{instantLoading ? 'Activating Instant Pass...' : 'Enter with Instant Device Pass'}</span>
-                </button>
+                </GlassButton>
 
                 <div className="relative py-1">
                   <div className="absolute inset-0 flex items-center">
-                    <div className="w-full border-t border-white/10" />
+                    <div className="w-full border-t border-[var(--nx-hairline)]" />
                   </div>
                   <div className="relative flex justify-center text-[11px] uppercase tracking-wider">
-                    <span className="bg-slate-950/90 px-2.5 text-slate-500">returning on a new browser?</span>
+                    <span className="nexora-glass-subtle px-3 py-0.5 rounded-full text-[var(--nx-text-secondary)]">
+                      returning on a new browser?
+                    </span>
                   </div>
                 </div>
 
-                <button
+                <GlassButton
                   type="button"
+                  variant="secondary"
+                  size="lg"
                   disabled={busy}
                   onClick={() => {
                     setError(null);
                     setScreen('access_key');
                   }}
-                  className="w-full h-11 rounded-xl bg-slate-800/75 hover:bg-slate-800 text-slate-200 border border-white/10 font-medium text-xs flex items-center justify-center gap-2 transition-colors cursor-pointer"
+                  className="w-full text-xs"
                 >
-                  <KeyRound className="w-3.5 h-3.5 text-cyan-300" />
+                  <KeyRound className="w-3.5 h-3.5 text-violet-600 dark:text-sky-300" />
                   <span>Restore with Access Key</span>
-                </button>
+                </GlassButton>
               </div>
 
-              <div className="pt-4 border-t border-white/10 grid grid-cols-2 gap-4 text-xs text-slate-400">
+              <div className="relative z-10 pt-4 border-t border-[var(--nx-hairline)] grid grid-cols-2 gap-4 text-xs text-[var(--nx-text-secondary)]">
                 <div className="flex items-start gap-2">
-                  <Lock className="w-4 h-4 text-cyan-400 shrink-0 mt-0.5" />
-                  <span>ECDH P-256 & AES-256-GCM device keys</span>
+                  <Lock className="w-4 h-4 text-sky-600 dark:text-sky-300 shrink-0 mt-0.5" />
+                  <span>ECDH P-256 &amp; AES-256-GCM device keys</span>
                 </div>
                 <div className="flex items-start gap-2">
-                  <ShieldCheck className="w-4 h-4 text-violet-400 shrink-0 mt-0.5" />
+                  <ShieldCheck className="w-4 h-4 text-violet-600 dark:text-violet-300 shrink-0 mt-0.5" />
                   <span>Auto-generated identity, zero forms</span>
                 </div>
               </div>
-            </div>
+            </GlassCard>
           </motion.div>
         )}
 
@@ -326,63 +363,65 @@ export function AuthFlow({ onAuthenticated }: AuthFlowProps) {
             animate={{ opacity: 1, y: 0 }}
             exit={{ opacity: 0, y: -12 }}
             transition={{ duration: 0.25, ease: [0.16, 1, 0.3, 1] }}
-            className="w-full max-w-md nexora-glass rounded-2xl p-6 sm:p-8 space-y-5"
+            className="relative z-10 w-full max-w-md"
           >
-            <div className="flex items-center justify-between">
-              <button
-                type="button"
-                onClick={() => {
-                  setError(null);
-                  setScreen('welcome');
-                }}
-                className="inline-flex items-center gap-1.5 text-sm text-slate-400 hover:text-white transition-colors min-h-[40px] cursor-pointer"
-              >
-                <ArrowLeft className="w-4 h-4" />
-                <span>Back</span>
-              </button>
-              <NexoraLogo size={28} />
-            </div>
-
-            {error && (
-              <div className="rounded-xl bg-rose-500/10 border border-rose-500/30 px-4 py-3 text-sm text-rose-200">
-                {error}
-              </div>
-            )}
-
-            <form onSubmit={handleAccessKeyLogin} className="space-y-4">
-              <div>
-                <h2 className="text-2xl font-display font-bold text-white flex items-center gap-2">
-                  <Sparkles className="w-5 h-5 text-cyan-300" />
-                  <span>Restore Session</span>
-                </h2>
-                <p className="text-sm text-slate-400 mt-1">
-                  Paste the <span className="font-mono-tabular text-slate-200">nxk_...</span> Access Key saved from your Instant Device Pass in Settings.
-                </p>
+            <GlassCard intensity="elevated" padding="lg" className="space-y-5 rounded-[28px] sm:p-8">
+              <div className="relative z-10 flex items-center justify-between">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setError(null);
+                    setScreen('welcome');
+                  }}
+                  className="inline-flex items-center gap-1.5 text-sm text-[var(--nx-text-secondary)] hover:text-[var(--nx-text-primary)] transition-colors min-h-[44px] cursor-pointer"
+                >
+                  <ArrowLeft className="w-4 h-4" />
+                  <span>Back</span>
+                </button>
+                <NexoraLogo size={28} />
               </div>
 
-              <div className="space-y-1.5">
-                <label className="text-xs font-medium text-slate-300">Access Key</label>
-                <div className="relative">
-                  <KeyRound className="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
-                  <input
+              {error && (
+                <div className="relative z-10 rounded-[18px] bg-rose-500/12 border border-rose-500/35 dark:border-rose-400/30 px-4 py-3 text-sm text-rose-700 dark:text-rose-200">
+                  {error}
+                </div>
+              )}
+
+              <form onSubmit={handleAccessKeyLogin} className="relative z-10 space-y-4">
+                <div>
+                  <h2 className="text-2xl font-display font-bold text-[var(--nx-text-primary)] flex items-center gap-2">
+                    <Sparkles className="w-5 h-5 text-violet-600 dark:text-sky-300" />
+                    <span>Restore Session</span>
+                  </h2>
+                  <p className="text-sm text-[var(--nx-text-secondary)] mt-1">
+                    Paste the <span className="font-mono-tabular text-[var(--nx-text-primary)] font-medium">nxk_...</span> Access Key saved from your Instant Device Pass in Profile.
+                  </p>
+                </div>
+
+                <div className="space-y-1.5">
+                  <label className="text-xs font-medium text-[var(--nx-text-secondary)]">Access Key</label>
+                  <GlassInput
                     type="text"
                     required
                     value={accessKeyInput}
                     onChange={(e) => setAccessKeyInput(e.target.value)}
                     placeholder="nxk_..."
-                    className="w-full h-11 pl-10 pr-4 rounded-xl bg-slate-900/80 border border-white/10 text-sm font-mono-tabular text-white placeholder:text-slate-500 focus:outline-none focus:border-violet-500"
+                    leadingIcon={<KeyRound className="w-4 h-4" />}
+                    className="h-11 font-mono-tabular"
                   />
                 </div>
-              </div>
 
-              <button
-                type="submit"
-                disabled={keyLoading}
-                className="w-full h-11 rounded-xl bg-violet-600 hover:bg-violet-500 disabled:opacity-50 text-white font-medium text-sm transition-colors cursor-pointer"
-              >
-                {keyLoading ? 'Restoring Device Session...' : 'Reconnect Session'}
-              </button>
-            </form>
+                <GlassButton
+                  type="submit"
+                  variant="primary"
+                  size="lg"
+                  disabled={keyLoading}
+                  className="w-full"
+                >
+                  {keyLoading ? 'Restoring Device Session...' : 'Reconnect Session'}
+                </GlassButton>
+              </form>
+            </GlassCard>
           </motion.div>
         )}
       </AnimatePresence>

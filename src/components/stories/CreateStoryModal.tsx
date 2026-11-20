@@ -1,8 +1,10 @@
 import React, { useState } from 'react';
-import { Image as ImageIcon, Lock, Upload, X } from 'lucide-react';
+import { Image as ImageIcon, Lock, Upload } from 'lucide-react';
+import { audioManager } from '../../audio/AudioManager';
 import { apiRequest, uploadEncryptedMedia } from '../../lib/api';
 import { encryptMediaBlob, encryptPrivateMessage, type StoredLocalKeyBundle } from '../../lib/crypto';
 import type { PublicUser, StoryVisibility } from '../../types/nexora';
+import { GlassButton, GlassInput, GlassModal } from '../ui/LiquidGlass';
 
 interface CreateStoryModalProps {
   currentUserId: string;
@@ -34,6 +36,7 @@ export function CreateStoryModal({
       setError('Select a photo or video for your 24-hour story.');
       return;
     }
+    audioManager.play('media.select');
     setError(null);
     setFile(f);
     setPreviewUrl(URL.createObjectURL(f));
@@ -102,23 +105,10 @@ export function CreateStoryModal({
   };
 
   return (
-    <div className="fixed inset-0 z-50 bg-black/75 backdrop-blur-sm flex items-center justify-center p-4" onClick={onClose}>
-      <div
-        className="w-full max-w-md nexora-glass rounded-2xl p-6 space-y-4 max-h-[90vh] overflow-y-auto"
-        onClick={(e) => e.stopPropagation()}
-      >
-        <div className="flex items-center justify-between">
-          <div className="flex items-center gap-2">
-            <ImageIcon className="w-5 h-5 text-cyan-400" />
-            <h3 className="text-lg font-display font-semibold text-white">Create 24h Story</h3>
-          </div>
-          <button type="button" onClick={onClose} className="p-2 text-slate-400 hover:text-white cursor-pointer">
-            <X className="w-4 h-4" />
-          </button>
-        </div>
-
+    <GlassModal title="Create 24h Story" onClose={onClose} maxWidthClass="max-w-md">
+      <div className="max-h-[78vh] overflow-y-auto space-y-4 pr-0.5">
         {error && (
-          <div className="rounded-xl bg-rose-500/10 border border-rose-500/30 px-3 py-2 text-xs text-rose-200">
+          <div className="rounded-[16px] bg-rose-500/12 border border-rose-500/30 px-3 py-2 text-xs text-rose-700 dark:text-rose-200">
             {error}
           </div>
         )}
@@ -126,7 +116,7 @@ export function CreateStoryModal({
         <form onSubmit={handleSubmit} className="space-y-4">
           <label className="block cursor-pointer">
             {previewUrl ? (
-              <div className="relative rounded-xl overflow-hidden bg-black/40 max-h-64 flex items-center justify-center">
+              <div className="relative rounded-[18px] overflow-hidden bg-black/60 max-h-64 flex items-center justify-center border border-white/40 dark:border-white/[0.1]">
                 {file?.type.startsWith('video/') ? (
                   <video src={previewUrl} controls className="max-h-64 w-full object-contain" />
                 ) : (
@@ -134,42 +124,54 @@ export function CreateStoryModal({
                 )}
               </div>
             ) : (
-              <div className="h-44 rounded-xl border border-dashed border-slate-600 bg-slate-900/70 flex flex-col items-center justify-center gap-2 text-slate-400 hover:border-violet-400 transition-colors">
-                <Upload className="w-6 h-6 text-violet-400" />
-                <span className="text-xs font-medium text-slate-200">Choose photo or video</span>
-                <span className="text-[11px] text-slate-500">Encrypted locally · Expires in 24 hours</span>
+              <div className="h-44 rounded-[18px] border border-dashed border-violet-500/40 dark:border-white/20 bg-white/45 dark:bg-white/[0.04] flex flex-col items-center justify-center gap-2 text-[var(--nx-text-secondary)] hover:border-violet-500 transition-colors">
+                <Upload className="w-6 h-6 text-violet-600 dark:text-violet-300" />
+                <span className="text-xs font-medium text-[var(--nx-text-primary)] flex items-center gap-1.5">
+                  <ImageIcon className="w-3.5 h-3.5 text-sky-600 dark:text-sky-300" />
+                  <span>Choose photo or video</span>
+                </span>
+                <span className="text-[11px] text-[var(--nx-text-muted)]">Encrypted locally · Expires in 24 hours</span>
               </div>
             )}
             <input type="file" accept="image/*,video/*" onChange={handleFile} className="hidden" />
           </label>
 
-          <input
+          <GlassInput
             type="text"
             maxLength={140}
             value={caption}
             onChange={(e) => setCaption(e.target.value)}
             placeholder="Add an encrypted caption (optional)"
-            className="w-full h-10 px-3.5 rounded-xl bg-slate-900/80 border border-white/10 text-sm text-white placeholder:text-slate-500 focus:outline-none focus:border-violet-500"
           />
 
           <div className="space-y-2">
             <div className="flex items-center justify-between text-xs">
-              <span className="text-slate-400">Visibility</span>
-              <div className="flex items-center gap-1 p-1 bg-slate-900 rounded-lg border border-white/10">
+              <span className="text-[var(--nx-text-secondary)]">Visibility</span>
+              <div className="flex items-center gap-1 p-1 nexora-glass-subtle rounded-[14px]">
                 <button
                   type="button"
-                  onClick={() => setVisibility('friends')}
-                  className={`px-2.5 py-1 rounded-md cursor-pointer ${
-                    visibility === 'friends' ? 'bg-violet-600 text-white' : 'text-slate-400'
+                  onClick={() => {
+                    audioManager.play('ui.tab_switch');
+                    setVisibility('friends');
+                  }}
+                  className={`px-2.5 py-1 rounded-[10px] cursor-pointer transition-colors ${
+                    visibility === 'friends'
+                      ? 'bg-white/80 dark:bg-white/[0.16] text-slate-900 dark:text-white shadow-sm'
+                      : 'text-[var(--nx-text-secondary)] hover:text-[var(--nx-text-primary)]'
                   }`}
                 >
                   All Friends
                 </button>
                 <button
                   type="button"
-                  onClick={() => setVisibility('close_friends')}
-                  className={`px-2.5 py-1 rounded-md cursor-pointer ${
-                    visibility === 'close_friends' ? 'bg-violet-600 text-white' : 'text-slate-400'
+                  onClick={() => {
+                    audioManager.play('ui.tab_switch');
+                    setVisibility('close_friends');
+                  }}
+                  className={`px-2.5 py-1 rounded-[10px] cursor-pointer transition-colors ${
+                    visibility === 'close_friends'
+                      ? 'bg-white/80 dark:bg-white/[0.16] text-slate-900 dark:text-white shadow-sm'
+                      : 'text-[var(--nx-text-secondary)] hover:text-[var(--nx-text-primary)]'
                   }`}
                 >
                   Selected Friends
@@ -178,14 +180,14 @@ export function CreateStoryModal({
             </div>
 
             {visibility === 'close_friends' && (
-              <div className="max-h-32 overflow-y-auto space-y-1 p-2 rounded-xl bg-slate-900/70 border border-white/10">
+              <div className="max-h-32 overflow-y-auto space-y-1 p-2.5 rounded-[16px] nexora-glass-subtle">
                 {friends.length === 0 ? (
-                  <div className="text-xs text-slate-500 text-center py-2">Add friends first to select viewers.</div>
+                  <div className="text-xs text-[var(--nx-text-secondary)] text-center py-2">Add friends first to select viewers.</div>
                 ) : (
                   friends.map((f) => {
                     const checked = selectedFriends.includes(f.id);
                     return (
-                      <label key={f.id} className="flex items-center gap-2.5 text-xs text-slate-200 cursor-pointer p-1">
+                      <label key={f.id} className="flex items-center gap-2.5 text-xs text-[var(--nx-text-primary)] cursor-pointer p-1">
                         <input
                           type="checkbox"
                           checked={checked}
@@ -205,20 +207,23 @@ export function CreateStoryModal({
             )}
           </div>
 
-          <div className="flex items-center gap-2 text-[11px] text-slate-400">
-            <Lock className="w-3.5 h-3.5 text-cyan-400 shrink-0" />
-            <span>Media & caption are encrypted with AES-256-GCM only for authorized viewers.</span>
+          <div className="flex items-center gap-2 text-[11px] text-[var(--nx-text-secondary)]">
+            <Lock className="w-3.5 h-3.5 text-violet-600 dark:text-sky-300 shrink-0" />
+            <span>Media &amp; caption are encrypted with AES-256-GCM only for authorized viewers.</span>
           </div>
 
-          <button
+          <GlassButton
             type="submit"
+            variant="primary"
+            size="lg"
+            soundEvent={false}
             disabled={loading || !file}
-            className="w-full h-11 rounded-xl bg-violet-600 hover:bg-violet-500 disabled:opacity-50 text-white font-medium text-sm transition-colors cursor-pointer"
+            className="w-full"
           >
             {loading ? 'Encrypting & Publishing...' : 'Share 24h Story'}
-          </button>
+          </GlassButton>
         </form>
       </div>
-    </div>
+    </GlassModal>
   );
 }

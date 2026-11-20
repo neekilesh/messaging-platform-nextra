@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { AnimatePresence, motion } from 'motion/react';
 import {
   AlertTriangle,
@@ -7,11 +7,15 @@ import {
   Gamepad2,
   Lock,
   MapPin,
-  MessageSquare,
+  MessageCircle,
+  Search,
   Settings,
   Sparkles,
+  User,
   Users,
+  X,
 } from 'lucide-react';
+import { audioManager } from './audio/AudioManager';
 import { apiRequest, getStoredToken, setStoredToken } from './lib/api';
 import {
   decryptGroupMessage,
@@ -21,7 +25,6 @@ import {
   type StoredLocalKeyBundle,
 } from './lib/crypto';
 import { connectSocket, disconnectSocket } from './lib/socket';
-import { playMagicalSound } from './lib/audio';
 import { useVisualPrefs } from './lib/theme';
 import type {
   AuthUser,
@@ -34,7 +37,15 @@ import type {
 import { AuthFlow } from './components/auth/AuthFlow';
 import { NexoraLogo } from './components/ui/NexoraLogo';
 import { CosmicBackdrop } from './components/ui/CosmicBackdrop';
-import { Avatar } from './components/ui/Avatar';
+import {
+  GlassButton,
+  GlassCard,
+  GlassHeader,
+  GlassInput,
+  GlassNavigation,
+  ProfileAvatar,
+  type GlassNavItem,
+} from './components/ui/LiquidGlass';
 import { ConnectionStatusBanner, CosmicLoader } from './components/ui/MagicalEffects';
 import { ConversationList } from './components/chat/ConversationList';
 import { ChatWindow } from './components/chat/ChatWindow';
@@ -52,19 +63,16 @@ import { NexusArena3D } from './components/three/NexusArena3D';
 
 type NavTab =
   | 'chats'
-  | 'groups'
   | 'stories'
-  | 'ai'
-  | 'maps'
-  | 'arena3d'
   | 'people'
   | 'notifications'
-  | 'settings';
+  | 'settings'
+  | 'ai'
+  | 'maps'
+  | 'arena3d';
 
 export default function App() {
-  const { effectiveReducedMotion, soundEnabled, soundPack } = useVisualPrefs();
-  const soundPrefsRef = React.useRef({ soundEnabled, soundPack });
-  soundPrefsRef.current = { soundEnabled, soundPack };
+  const { effectiveReducedMotion } = useVisualPrefs();
   const [booting, setBooting] = useState(true);
   const [user, setUser] = useState<AuthUser | null>(null);
   const [myKeys, setMyKeys] = useState<StoredLocalKeyBundle | null>(null);
@@ -78,22 +86,25 @@ export default function App() {
 
   const [navTab, setNavTab] = useState<NavTab>('chats');
   const [chatFilter, setChatFilter] = useState<'all' | 'groups' | 'archived'>('all');
+  const [homeSearch, setHomeSearch] = useState('');
   const [conversations, setConversations] = useState<ConversationSummary[]>([]);
+  const conversationsRef = useRef<ConversationSummary[]>([]);
+  conversationsRef.current = conversations;
+
   const [activeConversationId, setActiveConversationId] = useState<string | null>(null);
-  const activeConversationIdRef = React.useRef<string | null>(null);
+  const activeConversationIdRef = useRef<string | null>(null);
   activeConversationIdRef.current = activeConversationId;
-  const prevActiveConversationIdRef = React.useRef<string | null>(null);
+  const prevActiveConversationIdRef = useRef<string | null>(null);
 
   useEffect(() => {
     if (activeConversationId && activeConversationId !== prevActiveConversationIdRef.current) {
-      playMagicalSound(
-        'portal-activation',
-        soundPrefsRef.current.soundPack,
-        soundPrefsRef.current.soundEnabled
-      );
+      audioManager.play('ui.chat_open');
+    } else if (!activeConversationId && prevActiveConversationIdRef.current) {
+      audioManager.play('ui.chat_close');
     }
     prevActiveConversationIdRef.current = activeConversationId;
   }, [activeConversationId]);
+
   const [friends, setFriends] = useState<FriendItem[]>([]);
   const [friendRequests, setFriendRequests] = useState<FriendRequestItem[]>([]);
   const [stories, setStories] = useState<StoryRecord[]>([]);
@@ -103,6 +114,19 @@ export default function App() {
   const [showCreateStory, setShowCreateStory] = useState(false);
   const [storyViewerIndex, setStoryViewerIndex] = useState<number | null>(null);
   const [mapsQuotaExceeded, setMapsQuotaExceeded] = useState(false);
+
+  const switchNavTab = useCallback(
+    (next: NavTab) => {
+      if (next !== navTab) {
+        audioManager.play('ui.nav_switch');
+      }
+      setNavTab(next);
+      if (next === 'chats') {
+        setChatFilter('all');
+      }
+    },
+    [navTab]
+  );
 
   useEffect(() => {
     const onQuotaExceeded = () => setMapsQuotaExceeded(true);
@@ -160,22 +184,29 @@ export default function App() {
     []
   );
 
-  const loadWorkspaceData = useCallback(async (currentUser: AuthUser, keys: StoredLocalKeyBundle) => {
-    const [convRes, friendsRes, reqRes, storiesRes, notifRes] = await Promise.all([
-      apiRequest<{ conversations: ConversationSummary[] }>('/api/v1/conversations'),
-      apiRequest<{ friends: FriendItem[] }>('/api/v1/friends'),
-      apiRequest<{ requests: FriendRequestItem[] }>('/api/v1/friends/requests'),
-      apiRequest<{ stories: StoryRecord[] }>('/api/v1/stories'),
-      apiRequest<{ notifications: NotificationItem[] }>('/api/v1/notifications'),
-    ]);
+  const loadWorkspaceData = useCallback(
+    async (currentUser: AuthUser, keys: StoredLocalKeyBundle) => {
+      const [convRes, friendsRes, reqRes, storiesRes, notifRes] = await Promise.all([
+        apiRequest<{ conversations: ConversationSummary[] }>('/api/v1/conversations'),
+        apiRequest<{ friends: FriendItem[] }>('/api/v1/friends'),
+        apiRequest<{ requests: FriendRequestItem[] }>('/api/v1/friends/requests'),
+        apiRequest<{ stories: StoryRecord[] }>('/api/v1/stories'),
+        apiRequest<{ notifications: NotificationItem[] }>('/api/v1/notifications'),
+      ]);
 
-    const hydratedConvs = await decryptConversationLastMessages(convRes.conversations, currentUser.id, keys);
-    setConversations(hydratedConvs);
-    setFriends(friendsRes.friends);
-    setFriendRequests(reqRes.requests);
-    setStories(storiesRes.stories);
-    setNotifications(notifRes.notifications);
-  }, [decryptConversationLastMessages]);
+      const hydratedConvs = await decryptConversationLastMessages(
+        convRes.conversations,
+        currentUser.id,
+        keys
+      );
+      setConversations(hydratedConvs);
+      setFriends(friendsRes.friends);
+      setFriendRequests(reqRes.requests);
+      setStories(storiesRes.stories);
+      setNotifications(notifRes.notifications);
+    },
+    [decryptConversationLastMessages]
+  );
 
   // Restore session on startup
   useEffect(() => {
@@ -248,21 +279,33 @@ export default function App() {
         data.message.senderId !== user.id &&
         data.conversationId !== activeConversationIdRef.current
       ) {
-        playMagicalSound(
-          'receive-message',
-          soundPrefsRef.current.soundPack,
-          soundPrefsRef.current.soundEnabled
-        );
+        const conv = conversationsRef.current.find((c) => c.id === data.conversationId);
+        if (conv?.type === 'group') {
+          audioManager.play('notify.group');
+        } else {
+          audioManager.play('notify.private');
+        }
       }
       refreshAll();
     };
 
+    const handleFriendRequestEvent = () => {
+      audioManager.play('notify.friend_request');
+      refreshAll();
+    };
+
+    const handleFriendAcceptedEvent = () => {
+      audioManager.play('notify.friend_accepted');
+      refreshAll();
+    };
+
+    const handleStoryNewEvent = () => {
+      audioManager.play('notify.story_new');
+      refreshAll();
+    };
+
     const handleNotificationEvent = () => {
-      playMagicalSound(
-        'notification',
-        soundPrefsRef.current.soundPack,
-        soundPrefsRef.current.soundEnabled
-      );
+      audioManager.play('notify.private');
       refreshAll();
     };
 
@@ -278,9 +321,9 @@ export default function App() {
     sock.on('group:updated', refreshAll);
     sock.on('group:removed', refreshAll);
     sock.on('group:deleted', refreshAll);
-    sock.on('friend:request', handleNotificationEvent);
-    sock.on('friend:accepted', handleNotificationEvent);
-    sock.on('story:new', refreshAll);
+    sock.on('friend:request', handleFriendRequestEvent);
+    sock.on('friend:accepted', handleFriendAcceptedEvent);
+    sock.on('story:new', handleStoryNewEvent);
     sock.on('notification:new', handleNotificationEvent);
 
     return () => {
@@ -296,20 +339,22 @@ export default function App() {
       sock.off('group:updated', refreshAll);
       sock.off('group:removed', refreshAll);
       sock.off('group:deleted', refreshAll);
-      sock.off('friend:request', handleNotificationEvent);
-      sock.off('friend:accepted', handleNotificationEvent);
-      sock.off('story:new', refreshAll);
+      sock.off('friend:request', handleFriendRequestEvent);
+      sock.off('friend:accepted', handleFriendAcceptedEvent);
+      sock.off('story:new', handleStoryNewEvent);
       sock.off('notification:new', handleNotificationEvent);
     };
   }, [user, myKeys, loadWorkspaceData]);
 
   const handleAuthenticated = async (authUser: AuthUser, keys: StoredLocalKeyBundle) => {
+    audioManager.play('ui.settings_saved');
     setUser(authUser);
     setMyKeys(keys);
     await loadWorkspaceData(authUser, keys);
   };
 
   const handleLogout = async () => {
+    audioManager.play('ui.logout');
     await apiRequest('/api/v1/auth/logout', { method: 'POST' }).catch(() => {});
     disconnectSocket();
     setStoredToken(null);
@@ -334,7 +379,7 @@ export default function App() {
     return (
       <div className="min-h-screen w-full nexora-cosmos flex items-center justify-center relative overflow-hidden">
         <CosmicBackdrop />
-        <div className="relative z-10 flex flex-col items-center gap-2">
+        <div className="relative z-10 flex flex-col items-center gap-3">
           <NexoraLogo size={54} />
           <CosmicLoader
             label="Unlocking encrypted workspace..."
@@ -353,21 +398,25 @@ export default function App() {
   const unreadNotifs = notifications.filter((n) => !n.isRead).length;
   const pendingReqCount = friendRequests.filter((r) => r.direction === 'incoming').length;
   const totalUnreadMsgs = conversations.reduce((sum, c) => sum + (c.unreadCount || 0), 0);
+  const activeStreaksCount = friends.filter((f) => f.streak.isActive && f.streak.streakCount > 0).length;
 
-  const navItems: Array<{ id: NavTab; label: string; icon: React.ComponentType<{ className?: string }>; badge?: number }> = [
-    { id: 'chats', label: 'Chats', icon: MessageSquare, badge: totalUnreadMsgs },
-    { id: 'groups', label: 'Groups', icon: Users },
+  // 5 Primary Liquid Glass Destinations
+  const primaryNavItems: GlassNavItem[] = [
+    { id: 'chats', label: 'Chats', icon: MessageCircle, badge: totalUnreadMsgs },
     { id: 'stories', label: 'Stories', icon: CircleDot },
+    { id: 'people', label: 'Friends', icon: Users, badge: pendingReqCount },
+    { id: 'notifications', label: 'Activity', icon: Bell, badge: unreadNotifs },
+    { id: 'settings', label: 'Profile', icon: User },
+  ];
+
+  // Secondary integrated modules for Desktop dock & Profile quick access
+  const exploreNavItems: Array<{ id: NavTab; label: string; icon: React.ComponentType<{ className?: string }> }> = [
     { id: 'ai', label: 'AI Studio', icon: Sparkles },
     { id: 'maps', label: 'Maps', icon: MapPin },
     { id: 'arena3d', label: '3D Arena', icon: Gamepad2 },
-    { id: 'people', label: 'People', icon: Users, badge: pendingReqCount },
-    { id: 'notifications', label: 'Alerts', icon: Bell, badge: unreadNotifs },
-    { id: 'settings', label: 'Settings', icon: Settings },
   ];
 
-  const isChatView = navTab === 'chats' || navTab === 'groups';
-  const sectionKey = isChatView ? 'chats-groups' : navTab;
+  const isChatView = navTab === 'chats';
 
   return (
     <div className="h-screen w-screen overflow-hidden nexora-cosmos flex flex-col md:flex-row relative">
@@ -377,12 +426,12 @@ export default function App() {
       {mapsQuotaExceeded && (
         <div
           role="alert"
-          className="fixed top-0 left-0 right-0 z-50 bg-amber-950/95 border-b border-amber-500/40 px-4 py-2.5 flex flex-wrap items-center justify-between gap-3 text-xs text-amber-100"
+          className="fixed top-3 left-1/2 -translate-x-1/2 w-[94%] max-w-2xl z-50 nexora-glass rounded-2xl border border-amber-500/40 px-4 py-2.5 flex flex-wrap items-center justify-between gap-3 text-xs text-amber-900 dark:text-amber-100"
         >
           <div className="flex items-center gap-2">
-            <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0" />
+            <AlertTriangle className="w-4 h-4 text-amber-500 dark:text-amber-400 shrink-0" />
             <span>
-              The free Google Maps demo key has reached its quota limit. To continue uninterrupted, configure your own Google Cloud API key or review quota options.
+              The free Google Maps demo key reached its quota limit. Configure your own Google Cloud API key to continue uninterrupted.
             </span>
           </div>
           <div className="flex items-center gap-3">
@@ -390,14 +439,14 @@ export default function App() {
               href="https://developers.google.com/maps/ai/ai-studio?utm_campaign=gmp_mcp_codeassist_v1_aistudio#quota_exceeded_errors"
               target="_blank"
               rel="noreferrer"
-              className="font-semibold text-amber-300 underline hover:text-white"
+              className="font-semibold text-amber-700 dark:text-amber-300 underline hover:opacity-80"
             >
               Learn more
             </a>
             <button
               type="button"
               onClick={() => setMapsQuotaExceeded(false)}
-              className="text-amber-300 hover:text-white cursor-pointer"
+              className="font-medium hover:underline cursor-pointer"
             >
               Dismiss
             </button>
@@ -405,128 +454,216 @@ export default function App() {
         </div>
       )}
 
-      {/* Desktop Left Navigation Rail */}
-      <aside className="relative z-10 hidden md:flex w-[76px] border-r border-white/10 bg-[#090d1c]/85 backdrop-blur-xl flex-col items-center justify-between py-5 shrink-0">
-        <div className="flex flex-col items-center gap-6 w-full">
+      {/* Desktop Floating Liquid Glass Navigation Rail */}
+      <aside className="relative z-20 hidden md:flex p-3 pr-0 shrink-0">
+        <div className="w-[82px] nexora-glass-dock rounded-[30px] flex flex-col items-center justify-between py-4 px-2">
+          <div className="relative z-10 flex flex-col items-center gap-4 w-full">
+            <button
+              type="button"
+              onClick={() => switchNavTab('chats')}
+              aria-label="NEXORA Home"
+              className="cursor-pointer transition-transform active:scale-95"
+            >
+              <NexoraLogo size={36} />
+            </button>
+
+            <nav aria-label="Primary navigation" className="flex flex-col items-center gap-1.5 w-full">
+              {primaryNavItems.map((item) => {
+                const Icon = item.icon;
+                const active = navTab === item.id;
+                return (
+                  <button
+                    key={item.id}
+                    type="button"
+                    onClick={() => switchNavTab(item.id as NavTab)}
+                    title={item.label}
+                    aria-current={active ? 'page' : undefined}
+                    className={`relative w-full py-2 rounded-[16px] flex flex-col items-center gap-1 transition-colors cursor-pointer ${
+                      active
+                        ? 'text-violet-950 dark:text-white'
+                        : 'text-[var(--nx-text-secondary)] hover:text-[var(--nx-text-primary)] hover:bg-[var(--nx-surface-hover)]'
+                    }`}
+                  >
+                    {active && (
+                      <motion.span
+                        layoutId={effectiveReducedMotion ? undefined : 'desktop-nav-pill'}
+                        transition={{ type: 'spring', stiffness: 420, damping: 32 }}
+                        className="absolute inset-0 rounded-[16px] bg-white/70 dark:bg-gradient-to-b dark:from-white/[0.18] dark:to-white/[0.06] border border-white/85 dark:border-white/[0.18] shadow-[inset_0_1px_1px_rgba(255,255,255,0.6),0_4px_12px_rgba(40,30,90,0.08)]"
+                      />
+                    )}
+                    <Icon
+                      className={`w-[18px] h-[18px] relative z-10 ${
+                        active ? 'text-violet-600 dark:text-violet-200' : ''
+                      }`}
+                    />
+                    <span className="text-[10px] font-medium relative z-10">{item.label}</span>
+                    {item.badge && item.badge > 0 ? (
+                      <span className="absolute top-1 right-2 z-10 min-w-[16px] h-4 px-1 rounded-full bg-[#7c5cf6] text-white text-[10px] font-mono-tabular font-semibold flex items-center justify-center shadow-sm">
+                        {item.badge > 99 ? '99+' : item.badge}
+                      </span>
+                    ) : null}
+                  </button>
+                );
+              })}
+            </nav>
+
+            <div className="w-8 h-px bg-[var(--nx-hairline)] my-0.5" />
+
+            <div className="flex flex-col items-center gap-1 w-full">
+              {exploreNavItems.map((item) => {
+                const Icon = item.icon;
+                const active = navTab === item.id;
+                return (
+                  <button
+                    key={item.id}
+                    type="button"
+                    onClick={() => switchNavTab(item.id)}
+                    title={item.label}
+                    className={`relative w-full py-1.5 rounded-[14px] flex flex-col items-center gap-0.5 transition-colors cursor-pointer ${
+                      active
+                        ? 'text-violet-700 dark:text-sky-200 bg-white/65 dark:bg-white/[0.12]'
+                        : 'text-[var(--nx-text-muted)] hover:text-[var(--nx-text-primary)] hover:bg-[var(--nx-surface-hover)]'
+                    }`}
+                  >
+                    <Icon className="w-4 h-4" />
+                    <span className="text-[9px] font-medium">{item.label}</span>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+
           <button
             type="button"
-            onClick={() => {
-              setNavTab('chats');
-              setChatFilter('all');
-            }}
-            aria-label="NEXORA Home"
-            className="cursor-pointer"
+            onClick={() => switchNavTab('settings')}
+            title={`@${user.username}`}
+            className="relative z-10 cursor-pointer transition-transform active:scale-95"
           >
-            <NexoraLogo size={38} />
+            <ProfileAvatar src={user.avatarUrl} name={user.displayName} size="sm" isOnline />
           </button>
-
-          <nav className="flex flex-col items-center gap-2 w-full px-2">
-            {navItems.map((item) => {
-              const Icon = item.icon;
-              const active = navTab === item.id;
-              return (
-                <motion.button
-                  key={item.id}
-                  type="button"
-                  whileHover={effectiveReducedMotion ? undefined : { scale: 1.03 }}
-                  whileTap={effectiveReducedMotion ? undefined : { scale: 0.94 }}
-                  onClick={() => {
-                    setNavTab(item.id);
-                    if (item.id === 'chats') setChatFilter('all');
-                    if (item.id === 'groups') setChatFilter('groups');
-                  }}
-                  title={item.label}
-                  className={`relative w-full py-2.5 rounded-xl flex flex-col items-center gap-1 transition-colors cursor-pointer ${
-                    active ? 'text-cyan-300' : 'text-slate-400 hover:text-white hover:bg-white/5'
-                  }`}
-                >
-                  {active && (
-                    <motion.span
-                      layoutId={effectiveReducedMotion ? undefined : 'nav-rail-pill'}
-                      transition={{ type: 'spring', stiffness: 420, damping: 32 }}
-                      className="absolute inset-0 rounded-xl bg-violet-600/25 border border-violet-500/45 shadow-[0_0_18px_rgba(124,58,237,0.28)]"
-                    />
-                  )}
-                  <Icon
-                    className={`w-5 h-5 relative z-10 transition-all ${
-                      active ? 'drop-shadow-[0_0_8px_rgba(34,211,238,0.65)]' : ''
-                    }`}
-                  />
-                  <span className="text-[10px] font-medium relative z-10">{item.label}</span>
-                  {item.badge && item.badge > 0 ? (
-                    <span className="absolute top-1.5 right-2 z-10 min-w-[16px] h-4 px-1 rounded-full bg-violet-600 text-white text-[10px] font-mono-tabular flex items-center justify-center shadow-[0_0_8px_rgba(124,58,237,0.6)]">
-                      {item.badge}
-                    </span>
-                  ) : null}
-                </motion.button>
-              );
-            })}
-          </nav>
         </div>
-
-        <button
-          type="button"
-          onClick={() => setNavTab('settings')}
-          title={`@${user.username}`}
-          className="cursor-pointer"
-        >
-          <Avatar src={user.avatarUrl} name={user.displayName} size="sm" isOnline />
-        </button>
       </aside>
 
-      {/* Main Responsive Workspace with Portal Section Transitions */}
-      <main className="relative z-10 flex-1 flex min-w-0 min-h-0 pb-16 md:pb-0">
+      {/* Main Responsive Workspace */}
+      <main className="relative z-10 flex-1 flex min-w-0 min-h-0">
         <AnimatePresence mode="wait">
           <motion.div
-            key={sectionKey}
-            initial={
-              effectiveReducedMotion
-                ? false
-                : { opacity: 0, scale: 0.985, filter: 'blur(4px)' }
-            }
-            animate={{ opacity: 1, scale: 1, filter: 'blur(0px)' }}
-            exit={
-              effectiveReducedMotion
-                ? undefined
-                : { opacity: 0, scale: 0.99, filter: 'blur(2px)' }
-            }
-            transition={{
-              duration: effectiveReducedMotion ? 0 : 0.22,
-              ease: [0.16, 1, 0.3, 1],
-            }}
-            className="flex-1 flex min-w-0 min-h-0"
+            key={navTab}
+            initial={effectiveReducedMotion ? false : { opacity: 0, y: 6 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={effectiveReducedMotion ? undefined : { opacity: 0 }}
+            transition={{ duration: effectiveReducedMotion ? 0 : 0.18, ease: [0.16, 1, 0.3, 1] }}
+            className={`flex-1 flex min-w-0 min-h-0 ${
+              isChatView && activeConversation ? 'pb-0' : 'pb-22 md:pb-0'
+            }`}
           >
             {isChatView ? (
               <>
-                {/* Conversation List + Stories Strip */}
+                {/* Home / Messaging Dashboard Column */}
                 <section
-                  className={`w-full md:w-88 lg:w-96 border-r border-white/10 bg-[#0a0e1d]/80 backdrop-blur-md flex flex-col shrink-0 ${
+                  className={`w-full md:w-[372px] lg:w-[412px] md:my-3 md:ml-3 md:rounded-[28px] overflow-hidden md:nexora-glass-subtle flex flex-col shrink-0 ${
                     activeConversation ? 'hidden md:flex' : 'flex'
                   }`}
                 >
+                  {/* Top Liquid Glass Header with Avatar, Greeting, Search & Settings */}
+                  <GlassHeader variant="hero" className="pt-safe">
+                    <div className="relative z-10 flex items-center justify-between gap-3">
+                      <div className="flex items-center gap-3 min-w-0">
+                        <button
+                          type="button"
+                          onClick={() => switchNavTab('settings')}
+                          aria-label="Open profile"
+                          className="cursor-pointer transition-transform active:scale-95 shrink-0"
+                        >
+                          <ProfileAvatar
+                            src={user.avatarUrl}
+                            name={user.displayName}
+                            size="md"
+                            isOnline
+                            cosmicRing
+                          />
+                        </button>
+                        <div className="space-y-0.5 min-w-0">
+                          <div className="text-[11px] font-medium text-violet-700 dark:text-violet-200/85 tracking-wide truncate">
+                            NEXORA · @{user.username}
+                          </div>
+                          <h1 className="text-xl sm:text-2xl font-display font-bold tracking-tight text-[var(--nx-text-primary)] truncate">
+                            Let&apos;s Stay Connected
+                          </h1>
+                        </div>
+                      </div>
+
+                      <button
+                        type="button"
+                        onClick={() => switchNavTab('settings')}
+                        aria-label="Open profile and settings"
+                        title="Profile & Settings"
+                        className="min-h-[44px] min-w-[44px] rounded-full bg-white/55 hover:bg-white/75 dark:bg-white/[0.1] dark:hover:bg-white/[0.18] border border-white/75 dark:border-white/[0.16] flex items-center justify-center text-[var(--nx-text-primary)] transition-colors cursor-pointer shrink-0 shadow-[inset_0_1px_1px_rgba(255,255,255,0.45)]"
+                      >
+                        <Settings className="w-[18px] h-[18px]" />
+                      </button>
+                    </div>
+
+                    <div className="relative z-10 mt-3.5">
+                      <GlassInput
+                        type="text"
+                        value={homeSearch}
+                        onChange={(e) => setHomeSearch(e.target.value)}
+                        placeholder="Search messages or @handles..."
+                        aria-label="Search conversations"
+                        leadingIcon={<Search className="w-4 h-4" />}
+                        trailingAction={
+                          homeSearch ? (
+                            <button
+                              type="button"
+                              onClick={() => setHomeSearch('')}
+                              aria-label="Clear search"
+                              className="p-1.5 rounded-full text-[var(--nx-text-secondary)] hover:text-[var(--nx-text-primary)] cursor-pointer"
+                            >
+                              <X className="w-3.5 h-3.5" />
+                            </button>
+                          ) : undefined
+                        }
+                      />
+                    </div>
+                  </GlassHeader>
+
+                  {/* Horizontal Stories Section */}
                   <StoriesStrip
                     currentUser={user}
                     stories={stories}
-                    onOpenCreate={() => setShowCreateStory(true)}
+                    onOpenCreate={() => {
+                      audioManager.play('ui.glass_open');
+                      setShowCreateStory(true);
+                    }}
                     onOpenUserStories={(uid) => {
                       const idx = stories.findIndex((s) => s.userId === uid);
-                      if (idx >= 0) setStoryViewerIndex(idx);
+                      if (idx >= 0) {
+                        audioManager.play('story.open');
+                        setStoryViewerIndex(idx);
+                      }
                     }}
                   />
+
+                  {/* Conversation List */}
                   <div className="flex-1 min-h-0">
                     <ConversationList
                       conversations={conversations}
                       activeId={activeConversationId}
+                      searchQuery={homeSearch}
                       filterTab={chatFilter}
                       onFilterTabChange={setChatFilter}
                       onSelect={(conv) => setActiveConversationId(conv.id)}
-                      onOpenCreateGroup={() => setShowCreateGroup(true)}
-                      onOpenPeopleSearch={() => setNavTab('people')}
+                      onOpenCreateGroup={() => {
+                        audioManager.play('ui.glass_open');
+                        setShowCreateGroup(true);
+                      }}
+                      onOpenPeopleSearch={() => switchNavTab('people')}
                     />
                   </div>
                 </section>
 
-                {/* Active Chat Viewport */}
+                {/* Active Luxury Chat Viewport */}
                 <section
                   className={`flex-1 min-w-0 h-full ${
                     activeConversation ? 'flex' : 'hidden md:flex'
@@ -544,36 +681,52 @@ export default function App() {
                         onConversationUpdated={() => loadWorkspaceData(user, myKeys)}
                       />
                     ) : (
-                      <div className="flex-1 flex flex-col items-center justify-center p-8 text-center space-y-5">
-                        <NexoraLogo size={64} />
-                        <div className="space-y-2 max-w-md">
-                          <h1 className="text-2xl font-display font-bold text-white">
-                            Welcome, @{user.username}
-                          </h1>
-                          <p className="text-sm text-slate-400 leading-relaxed">
-                            Select an encrypted conversation or search for friends by their @username to start messaging privately with real-time delivery, voice notes, stories, and streaks.
-                          </p>
-                        </div>
-                        <div className="flex items-center gap-3">
-                          <button
-                            type="button"
-                            onClick={() => setNavTab('people')}
-                            className="h-10 px-4 rounded-xl bg-violet-600 hover:bg-violet-500 text-white text-xs font-medium cursor-pointer shadow-[0_0_16px_rgba(124,58,237,0.3)] transition-colors"
-                          >
-                            Find @username
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => setShowCreateGroup(true)}
-                            className="h-10 px-4 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-medium cursor-pointer transition-colors"
-                          >
-                            Create 25-Member Group
-                          </button>
-                        </div>
-                        <div className="text-xs text-slate-500 inline-flex items-center gap-1.5">
-                          <Lock className="w-3.5 h-3.5 text-cyan-400" />
-                          <span>Identity Key Fingerprint: <span className="font-mono-tabular text-slate-400">{myKeys.fingerprint}</span></span>
-                        </div>
+                      <div className="flex-1 flex items-center justify-center p-8">
+                        <GlassCard
+                          intensity="medium"
+                          padding="lg"
+                          className="max-w-md w-full text-center space-y-5 rounded-[30px]"
+                        >
+                          <div className="relative z-10 mx-auto w-fit">
+                            <NexoraLogo size={58} />
+                          </div>
+                          <div className="relative z-10 space-y-2">
+                            <h2 className="text-xl font-display font-bold text-[var(--nx-text-primary)]">
+                              Welcome, {user.displayName}
+                            </h2>
+                            <p className="text-sm text-[var(--nx-text-secondary)] leading-relaxed">
+                              Choose an encrypted conversation on the left or find friends by @username to start messaging privately.
+                            </p>
+                          </div>
+                          <div className="relative z-10 flex items-center justify-center gap-2.5 flex-wrap">
+                            <GlassButton
+                              type="button"
+                              variant="primary"
+                              onClick={() => switchNavTab('people')}
+                            >
+                              Find @username
+                            </GlassButton>
+                            <GlassButton
+                              type="button"
+                              variant="secondary"
+                              onClick={() => {
+                                audioManager.play('ui.glass_open');
+                                setShowCreateGroup(true);
+                              }}
+                            >
+                              New Group
+                            </GlassButton>
+                          </div>
+                          <div className="relative z-10 pt-3 border-t border-[var(--nx-hairline)] text-xs text-[var(--nx-text-secondary)] inline-flex items-center justify-center gap-1.5">
+                            <Lock className="w-3.5 h-3.5 text-violet-600 dark:text-sky-300" />
+                            <span>
+                              Key Fingerprint:{' '}
+                              <span className="font-mono-tabular text-[var(--nx-text-primary)]">
+                                {myKeys.fingerprint}
+                              </span>
+                            </span>
+                          </div>
+                        </GlassCard>
                       </div>
                     )}
                   </AnimatePresence>
@@ -583,15 +736,21 @@ export default function App() {
               <StoriesDashboard
                 currentUser={user}
                 stories={stories}
-                onOpenCreate={() => setShowCreateStory(true)}
-                onOpenStoryIndex={(idx) => setStoryViewerIndex(idx)}
+                onOpenCreate={() => {
+                  audioManager.play('ui.glass_open');
+                  setShowCreateStory(true);
+                }}
+                onOpenStoryIndex={(idx) => {
+                  audioManager.play('story.open');
+                  setStoryViewerIndex(idx);
+                }}
               />
             ) : navTab === 'ai' ? (
               <AiStudioHub />
             ) : navTab === 'maps' ? (
               <MapsExplorerPanel />
             ) : navTab === 'arena3d' ? (
-              <NexusArena3D onExit={() => setNavTab('chats')} />
+              <NexusArena3D onExit={() => switchNavTab('chats')} />
             ) : navTab === 'people' ? (
               <PeoplePanel
                 friends={friends}
@@ -608,6 +767,9 @@ export default function App() {
               <SettingsPanel
                 user={user}
                 myKeys={myKeys}
+                friendsCount={friends.length}
+                activeStreaksCount={activeStreaksCount}
+                onOpenExplore={(target) => switchNavTab(target)}
                 onUserUpdated={(updated) => setUser(updated)}
                 onLogout={handleLogout}
               />
@@ -616,47 +778,14 @@ export default function App() {
         </AnimatePresence>
       </main>
 
-      {/* Mobile Bottom Tab Bar (Thumb-zone ergonomic, compact height) */}
-      <nav className="md:hidden fixed bottom-0 left-0 right-0 z-40 h-16 bg-[#090d1c]/95 backdrop-blur-lg border-t border-white/10 flex items-center overflow-x-auto">
-        {navItems
-          .filter((n) => n.id !== 'groups')
-          .map((item) => {
-            const Icon = item.icon;
-            const active = navTab === item.id;
-            return (
-              <button
-                key={item.id}
-                type="button"
-                onClick={() => {
-                  setNavTab(item.id);
-                  if (item.id === 'chats') setChatFilter('all');
-                }}
-                className={`relative flex-1 min-w-[60px] flex flex-col items-center justify-center h-full gap-1 cursor-pointer transition-colors ${
-                  active ? 'text-cyan-300' : 'text-slate-400'
-                }`}
-              >
-                {active && (
-                  <motion.span
-                    layoutId={effectiveReducedMotion ? undefined : 'mobile-nav-pill'}
-                    transition={{ type: 'spring', stiffness: 420, damping: 32 }}
-                    className="absolute inset-x-2 inset-y-1.5 rounded-xl bg-violet-600/20 border border-violet-500/35 pointer-events-none"
-                  />
-                )}
-                <Icon
-                  className={`w-5 h-5 relative z-10 ${
-                    active ? 'drop-shadow-[0_0_8px_rgba(34,211,238,0.65)]' : ''
-                  }`}
-                />
-                <span className="text-[10px] font-medium relative z-10">{item.label}</span>
-                {item.badge && item.badge > 0 ? (
-                  <span className="absolute top-2 right-4 z-10 min-w-[15px] h-4 px-1 rounded-full bg-violet-600 text-white text-[9px] font-mono-tabular flex items-center justify-center">
-                    {item.badge}
-                  </span>
-                ) : null}
-              </button>
-            );
-          })}
-      </nav>
+      {/* Mobile Floating Pill Bottom Navigation (5 Core Destinations) */}
+      {!(isChatView && activeConversation) && (
+        <GlassNavigation
+          items={primaryNavItems}
+          activeId={navTab}
+          onSelect={(id) => switchNavTab(id as NavTab)}
+        />
+      )}
 
       {/* Modals & Viewers */}
       {showCreateGroup && (
@@ -665,6 +794,7 @@ export default function App() {
           myKeys={myKeys}
           friends={friends.map((f) => f.user)}
           onCreated={async (convId) => {
+            audioManager.play('group.create');
             setShowCreateGroup(false);
             await loadWorkspaceData(user, myKeys);
             setNavTab('chats');
@@ -681,6 +811,7 @@ export default function App() {
           myKeys={myKeys}
           friends={friends.map((f) => f.user)}
           onCreated={async () => {
+            audioManager.play('story.upload');
             setShowCreateStory(false);
             await loadWorkspaceData(user, myKeys);
           }}
@@ -695,7 +826,10 @@ export default function App() {
             initialIndex={storyViewerIndex}
             currentUserId={user.id}
             myKeys={myKeys}
-            onClose={() => setStoryViewerIndex(null)}
+            onClose={() => {
+              audioManager.play('story.close');
+              setStoryViewerIndex(null);
+            }}
             onRefresh={() => loadWorkspaceData(user, myKeys)}
             onReplySent={(convId) => {
               setStoryViewerIndex(null);

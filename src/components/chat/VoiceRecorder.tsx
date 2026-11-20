@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { motion } from 'motion/react';
 import { Mic, Send, Trash2 } from 'lucide-react';
-import { playSound } from '../../lib/sound';
+import { audioManager } from '../../audio/AudioManager';
 import { useVisualPrefs } from '../../lib/theme';
 
 interface VoiceRecorderProps {
@@ -36,6 +36,7 @@ export function VoiceRecorder({ onSendVoice, disabled }: VoiceRecorderProps) {
   }, []);
 
   const cleanupMedia = () => {
+    audioManager.setVoiceRecordingActive(false);
     if (rafRef.current) cancelAnimationFrame(rafRef.current);
     rafRef.current = null;
     if (streamRef.current) {
@@ -111,26 +112,29 @@ export function VoiceRecorder({ onSendVoice, disabled }: VoiceRecorderProps) {
         setBars(Array(24).fill(0.15));
 
         if (!shouldCancel && blob.size > 0) {
+          audioManager.play('voice.send');
           await onSendVoice(blob, elapsed, samples);
           setJustSent(true);
           window.setTimeout(() => setJustSent(false), 900);
         }
       };
 
+      // Suppress ambient UI/notification audio while user records microphone voice message
+      audioManager.setVoiceRecordingActive(true);
       recorder.start(100);
       setRecording(true);
-      playSound('voice.record_start');
+      audioManager.play('voice.record_start');
     } catch {
       cleanupMedia();
       setErrorMsg('Microphone permission required for voice messages.');
-      playSound('message.failed');
+      audioManager.play('message.failed');
     }
   };
 
   const stopAndSend = () => {
     if (!mediaRecorderRef.current || mediaRecorderRef.current.state === 'inactive') return;
     cancelFlagRef.current = false;
-    playSound('voice.record_stop');
+    audioManager.play('voice.record_stop');
     mediaRecorderRef.current.stop();
   };
 
@@ -141,7 +145,7 @@ export function VoiceRecorder({ onSendVoice, disabled }: VoiceRecorderProps) {
       return;
     }
     cancelFlagRef.current = true;
-    playSound('message.deleted');
+    audioManager.play('voice.delete');
     mediaRecorderRef.current.stop();
   };
 
@@ -165,13 +169,13 @@ export function VoiceRecorder({ onSendVoice, disabled }: VoiceRecorderProps) {
         onPointerUp={() => {
           if (dragCancel) cancelRecording();
         }}
-        className="flex items-center gap-3 flex-1 bg-violet-950/60 border border-cyan-400/40 rounded-xl px-3 py-1.5 shadow-[0_0_24px_rgba(139,92,246,0.22)]"
+        className="flex items-center gap-3 flex-1 nexora-glass border border-violet-400/50 rounded-full px-3 py-1.5"
       >
         <button
           type="button"
           onClick={cancelRecording}
           aria-label="Cancel voice recording"
-          className="p-2 text-rose-300 hover:text-rose-200 hover:bg-rose-500/15 rounded-lg transition-colors cursor-pointer"
+          className="p-2 text-rose-500 dark:text-rose-300 hover:bg-rose-500/15 rounded-full transition-colors cursor-pointer"
         >
           <Trash2 className="w-4 h-4" />
         </button>
@@ -182,12 +186,12 @@ export function VoiceRecorder({ onSendVoice, disabled }: VoiceRecorderProps) {
               <motion.span
                 animate={{ scale: [1, 1.55, 1], opacity: [0.65, 0, 0.65] }}
                 transition={{ duration: 1.4, repeat: Infinity, ease: 'easeInOut' }}
-                className="absolute inset-0 rounded-full bg-cyan-400/35"
+                className="absolute inset-0 rounded-full bg-sky-400/35"
               />
             )}
-            <Mic className="w-3.5 h-3.5 text-cyan-300 relative z-10" />
+            <Mic className="w-3.5 h-3.5 text-sky-600 dark:text-cyan-300 relative z-10" />
           </span>
-          <span className="font-mono-tabular text-xs text-cyan-300 min-w-[38px]">
+          <span className="font-mono-tabular text-xs text-sky-700 dark:text-cyan-300 min-w-[38px]">
             {formatDuration(durationMs)}
           </span>
         </div>
@@ -196,14 +200,14 @@ export function VoiceRecorder({ onSendVoice, disabled }: VoiceRecorderProps) {
           {bars.map((val, idx) => (
             <div
               key={idx}
-              className="flex-1 bg-gradient-to-t from-violet-500 via-indigo-400 to-cyan-300 rounded-full transition-all duration-75 shadow-[0_0_6px_rgba(34,211,238,0.35)]"
+              className="flex-1 bg-gradient-to-t from-violet-500 via-indigo-400 to-cyan-400 rounded-full transition-all duration-75"
               style={{ height: `${Math.round(val * 100)}%`, minHeight: '4px' }}
             />
           ))}
         </div>
 
-        <span className="text-[11px] text-slate-400 hidden sm:inline">
-          {dragCancel ? 'Release to cancel' : 'Slide left or click trash to cancel'}
+        <span className="text-[11px] text-[var(--nx-text-secondary)] hidden sm:inline">
+          {dragCancel ? 'Release to cancel' : 'Slide left or tap trash to cancel'}
         </span>
 
         <motion.button
@@ -212,7 +216,7 @@ export function VoiceRecorder({ onSendVoice, disabled }: VoiceRecorderProps) {
           whileTap={effectiveReducedMotion ? undefined : { scale: 0.95 }}
           onClick={stopAndSend}
           aria-label="Send voice message"
-          className="relative h-9 px-3 rounded-lg bg-violet-600 hover:bg-violet-500 text-white text-xs font-medium inline-flex items-center gap-1.5 transition-colors cursor-pointer shadow-[0_0_16px_rgba(139,92,246,0.45)]"
+          className="relative h-9 px-3.5 rounded-full bg-gradient-to-br from-[#7c5cf6] to-[#566ee6] text-white text-xs font-medium inline-flex items-center gap-1.5 transition-all cursor-pointer shadow-md"
         >
           <Send className="w-3.5 h-3.5" />
           <span>Send</span>
@@ -224,7 +228,7 @@ export function VoiceRecorder({ onSendVoice, disabled }: VoiceRecorderProps) {
   return (
     <div className="relative flex items-center">
       {errorMsg && (
-        <div className="absolute bottom-12 right-0 w-56 rounded-lg bg-rose-950/90 border border-rose-500/40 px-3 py-2 text-xs text-rose-200 z-30">
+        <div className="absolute bottom-12 right-0 w-56 rounded-xl nexora-glass-elevated border border-rose-500/40 px-3 py-2 text-xs text-rose-700 dark:text-rose-200 z-30">
           {errorMsg}
         </div>
       )}
@@ -234,21 +238,21 @@ export function VoiceRecorder({ onSendVoice, disabled }: VoiceRecorderProps) {
           animate={{ scale: 2.1, opacity: 0 }}
           transition={{ duration: 0.7, ease: [0.16, 1, 0.3, 1] }}
           aria-hidden="true"
-          className="pointer-events-none absolute inset-0 rounded-xl border border-cyan-300"
+          className="pointer-events-none absolute inset-0 rounded-full border border-sky-400"
         />
       )}
       <motion.button
         type="button"
         disabled={disabled}
         data-sound-custom="true"
-        whileHover={effectiveReducedMotion ? undefined : { scale: 1.05 }}
+        whileHover={effectiveReducedMotion ? undefined : { scale: 1.04 }}
         whileTap={effectiveReducedMotion ? undefined : { scale: 0.93 }}
         onClick={(e) => startRecording(e.clientX)}
         title="Record voice message"
         aria-label="Record voice message"
-        className="min-h-[40px] min-w-[40px] rounded-xl bg-slate-800/75 hover:bg-violet-600/30 border border-white/10 hover:border-cyan-400/40 text-slate-300 hover:text-cyan-300 flex items-center justify-center transition-colors cursor-pointer disabled:opacity-40"
+        className="min-h-[40px] min-w-[40px] rounded-full bg-white/60 hover:bg-violet-500/20 dark:bg-white/[0.08] dark:hover:bg-violet-500/25 border border-white/75 dark:border-white/[0.14] text-[var(--nx-text-primary)] flex items-center justify-center transition-colors cursor-pointer disabled:opacity-40"
       >
-        <Mic className="w-4 h-4" />
+        <Mic className="w-[18px] h-[18px]" />
       </motion.button>
     </div>
   );

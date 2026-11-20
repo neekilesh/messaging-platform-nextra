@@ -42,7 +42,8 @@ import {
   type StoredLocalKeyBundle,
 } from '../../lib/crypto';
 import { getSocket } from '../../lib/socket';
-import { playMagicalSound } from '../../lib/audio';
+import { audioManager } from '../../audio/AudioManager';
+import { formatFullTimestamp, formatRelativeTimestamp } from '../../lib/time';
 import { useVisualPrefs } from '../../lib/theme';
 import type {
   ConversationSummary,
@@ -55,7 +56,11 @@ import type {
   SignedEncryptedReadReceipt,
   StreakInfo,
 } from '../../types/nexora';
-import { Avatar } from '../ui/Avatar';
+import {
+  GlassComposer,
+  GlassMessageBubble,
+  ProfileAvatar,
+} from '../ui/LiquidGlass';
 import {
   CosmicLoader,
   DeliveryWarningIcon,
@@ -80,6 +85,7 @@ interface ChatWindowProps {
 }
 
 const REACTION_EMOJIS = ['❤️', '🔥', '😂', '😮', '😢', '👍', '✨', '🙏'];
+const COMPOSER_EMOJIS = ['❤️', '😂', '🙌', '🔥', '✨', '👍', '😊', '🙏', '🎉', '💜', '👀', '🥳'];
 
 const DISAPPEARING_OPTIONS = [
   { label: 'Off', seconds: 0 },
@@ -103,9 +109,7 @@ export function ChatWindow({
 }: ChatWindowProps) {
   const [messages, setMessages] = useState<MessageRecord[]>([]);
   const [liveArrivalIds, setLiveArrivalIds] = useState<Set<string>>(() => new Set());
-  const { effectiveReducedMotion: prefersReducedMotion, soundEnabled, soundPack } = useVisualPrefs();
-  const soundPrefsRef = useRef({ soundEnabled, soundPack });
-  soundPrefsRef.current = { soundEnabled, soundPack };
+  const { effectiveReducedMotion: prefersReducedMotion } = useVisualPrefs();
   const [liveStreak, setLiveStreak] = useState<StreakInfo | null>(conversation.streak);
   const streakTrackerRef = useRef<{
     conversationId: string;
@@ -144,7 +148,9 @@ export function ChatWindow({
   const [showTimerMenu, setShowTimerMenu] = useState(false);
   const [showSafetyModal, setShowSafetyModal] = useState(false);
   const [showGroupDrawer, setShowGroupDrawer] = useState(false);
+  const [showComposerEmoji, setShowComposerEmoji] = useState(false);
   const [lightbox, setLightbox] = useState<{ url: string; mimeType: string; fileName?: string | null } | null>(null);
+  const [nowMs, setNowMs] = useState(() => Date.now());
 
   const [typingUsers, setTypingUsers] = useState<Record<string, boolean>>({});
   const [groupDetails, setGroupDetails] = useState<GroupDetails | null>(null);
@@ -156,6 +162,7 @@ export function ChatWindow({
 
   const bottomRef = useRef<HTMLDivElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const composerInputRef = useRef<HTMLTextAreaElement | null>(null);
   const typingTimeoutRef = useRef<number | null>(null);
   const longPressTimerRef = useRef<number | null>(null);
   const longPressStartRef = useRef<{ x: number; y: number; msgId: string } | null>(null);
@@ -447,11 +454,9 @@ export function ChatWindow({
       !tracker.celebrated.has(milestoneDay)
     ) {
       tracker.celebrated.add(milestoneDay);
-      playMagicalSound(
-        'streak-milestone',
-        soundPrefsRef.current.soundPack,
-        soundPrefsRef.current.soundEnabled
-      );
+      audioManager.play('achievement.streak_milestone');
+    } else if (prevCount === 0 && nextCount > 0) {
+      audioManager.play('achievement.streak_started');
     }
 
     tracker.lastCount = nextCount;
@@ -475,6 +480,7 @@ export function ChatWindow({
     setActiveMenuMsgId(null);
     setPressingMsgId(null);
     setShowGroupDrawer(false);
+    setShowComposerEmoji(false);
     setShowSearch(false);
     setSearchQuery('');
     setErrorBanner(null);
@@ -508,7 +514,11 @@ export function ChatWindow({
   }, [reactMsgId, activeMenuMsgId]);
 
   useEffect(() => {
+    const interval = window.setInterval(() => {
+      setNowMs(Date.now());
+    }, 30_000);
     return () => {
+      window.clearInterval(interval);
       if (longPressTimerRef.current) {
         window.clearTimeout(longPressTimerRef.current);
       }
@@ -563,11 +573,7 @@ export function ChatWindow({
       }
       if (data.message.senderId !== currentUserId) {
         if (isFreshInsertion) {
-          playMagicalSound(
-            'receive-message',
-            soundPrefsRef.current.soundPack,
-            soundPrefsRef.current.soundEnabled
-          );
+          audioManager.play(conversation.type === 'group' ? 'group.receive' : 'message.receive');
         }
         sock.emit('message:delivered', { messageId: data.message.id, conversationId: conversation.id });
         sendSignedReadReceipts([decrypted]).catch(() => {});
@@ -632,6 +638,10 @@ export function ChatWindow({
 
     const handleReceipt = (data: { conversationId: string; messageId: string; status: MessageRecord['status'] }) => {
       if (data.conversationId !== conversation.id) return;
+      const target = messagesRef.current.find((m) => m.id === data.messageId);
+      if (target && target.senderId === currentUserId && data.status === 'delivered' && target.status === 'sent') {
+        audioManager.play('message.delivered');
+      }
       setMessages((prev) =>
         prev.map((m) => (m.id === data.messageId ? { ...m, status: data.status } : m))
       );
@@ -666,9 +676,13 @@ export function ChatWindow({
         }
       }
 
+      let hadNewRead = false;
       setMessages((prev) =>
         prev.map((m) => {
           if (!setIds.has(m.id)) return m;
+          if (m.senderId === currentUserId && m.status !== 'read') {
+            hadNewRead = true;
+          }
           const receipt = receiptByMsgId.get(m.id);
           const verif = verifiedByMsgId.get(m.id);
           return {
@@ -679,6 +693,9 @@ export function ChatWindow({
           };
         })
       );
+      if (hadNewRead) {
+        audioManager.play('message.read');
+      }
     };
 
     const handleTyping = (data: { conversationId: string; userId: string; isTyping: boolean }) => {
@@ -809,7 +826,9 @@ export function ChatWindow({
 
       const hydrated = { ...res.message, localDecrypted: payload };
       setMessages((prev) => prev.map((m) => (m.id === msgId ? hydrated : m)));
-      playMagicalSound('send-message', soundPrefsRef.current.soundPack, soundPrefsRef.current.soundEnabled);
+      if (kind !== 'voice') {
+        audioManager.play(conversation.type === 'group' ? 'group.send' : 'message.send');
+      }
       if (res.streak !== undefined) {
         evaluateStreakMilestone(res.streak);
       }
@@ -822,6 +841,7 @@ export function ChatWindow({
       }
       onConversationUpdated();
     } catch (err) {
+      audioManager.play('message.failed');
       setMessages((prev) =>
         prev.map((m) => (m.id === msgId ? { ...m, status: 'failed', localStatus: 'failed' } : m))
       );
@@ -887,8 +907,10 @@ export function ChatWindow({
     if (!file) return;
 
     setErrorBanner(null);
+    audioManager.play('media.select');
     setUploadProgress(`Encrypting ${file.name}...`);
     try {
+      audioManager.play('media.upload_start');
       const encResult = await encryptMediaBlob(file);
       setUploadProgress(`Uploading encrypted media...`);
       const uploadRes = await uploadEncryptedMedia(encResult.encryptedBytes, {
@@ -915,7 +937,9 @@ export function ChatWindow({
         },
         uploadRes.attachmentId
       );
+      audioManager.play('media.upload_success');
     } catch (err) {
+      audioManager.play('media.upload_error');
       setErrorBanner(err instanceof Error ? err.message : 'Media encryption/upload failed.');
     } finally {
       setUploadProgress(null);
@@ -1095,7 +1119,7 @@ export function ChatWindow({
     setMessages((prev) =>
       prev.map((m) => (m.id === messageId ? { ...m, reactions: optimisticReactions } : m))
     );
-    playMagicalSound('reaction', soundPrefsRef.current.soundPack, soundPrefsRef.current.soundEnabled);
+    audioManager.play('message.react');
     if (!prefersReducedMotion && !alreadyHas) {
       setReactionBurst({ key: `${messageId}:${emoji}`, ts: Date.now() });
     }
@@ -1179,6 +1203,7 @@ export function ChatWindow({
 
   const deleteMessage = async (msgId: string, scope: 'delete_for_me' | 'delete_for_everyone') => {
     setActiveMenuMsgId(null);
+    audioManager.play('message.deleted');
     await apiRequest(`/api/v1/conversations/messages/${msgId}`, {
       method: 'PATCH',
       body: JSON.stringify({ action: scope }),
@@ -1190,6 +1215,7 @@ export function ChatWindow({
 
   const updateDisappearing = async (seconds: number) => {
     setShowTimerMenu(false);
+    audioManager.play('ui.settings_saved');
     await apiRequest(`/api/v1/conversations/${conversation.id}/settings`, {
       method: 'PATCH',
       body: JSON.stringify({ disappearingSeconds: seconds }),
@@ -1199,6 +1225,7 @@ export function ChatWindow({
 
   const toggleMuteOrArchive = async (patch: { muted?: boolean; archived?: boolean }) => {
     setShowHeaderMenu(false);
+    audioManager.play('ui.settings_saved');
     await apiRequest(`/api/v1/conversations/${conversation.id}/settings`, {
       method: 'PATCH',
       body: JSON.stringify(patch),
@@ -1245,30 +1272,20 @@ export function ChatWindow({
       className="flex h-full w-full overflow-hidden relative"
     >
       <div className="flex-1 flex flex-col h-full min-w-0">
-        {/* Conversation Header */}
-        <header className="relative overflow-hidden px-4 sm:px-6 py-3 border-b border-white/10 bg-[#0b0f1f]/80 backdrop-blur-md flex items-center justify-between gap-3 shrink-0">
-          {!prefersReducedMotion && (
-            <motion.div
-              key={`aurora-${conversation.id}`}
-              initial={{ x: '-100%', opacity: 0.65 }}
-              animate={{ x: '120%', opacity: 0 }}
-              transition={{ duration: 0.95, ease: [0.16, 1, 0.3, 1] }}
-              aria-hidden="true"
-              className="pointer-events-none absolute inset-y-0 w-1/2 bg-gradient-to-r from-transparent via-violet-500/20 to-cyan-400/15"
-            />
-          )}
-          <div className="flex items-center gap-3 min-w-0 relative z-10">
+        {/* Floating Liquid Glass Chat Header */}
+        <header className="relative z-20 md:mx-4 md:mt-3 md:rounded-[24px] nexora-glass border-x-0 md:border-x border-t-0 md:border-t px-3 sm:px-5 py-3 pt-safe flex items-center justify-between gap-3 shrink-0">
+          <div className="flex items-center gap-2.5 min-w-0 relative z-10">
             {onBackMobile && (
               <button
                 type="button"
                 onClick={onBackMobile}
                 aria-label="Back to conversations"
-                className="md:hidden p-2 -ml-2 text-slate-300 hover:text-white cursor-pointer"
+                className="md:hidden min-h-[44px] min-w-[44px] -ml-1.5 rounded-full hover:bg-[var(--nx-surface-hover)] text-[var(--nx-text-secondary)] hover:text-[var(--nx-text-primary)] flex items-center justify-center transition-colors cursor-pointer"
               >
                 <ArrowLeft className="w-5 h-5" />
               </button>
             )}
-            <Avatar
+            <ProfileAvatar
               src={conversation.avatarUrl}
               name={conversation.title}
               size="md"
@@ -1277,14 +1294,14 @@ export function ChatWindow({
             />
             <div className="min-w-0">
               <div className="flex items-center gap-2">
-                <h2 className="text-base font-display font-semibold text-white truncate">
+                <h2 className="text-base font-display font-semibold text-[var(--nx-text-primary)] truncate">
                   {conversation.title}
                 </h2>
                 <StreakCounter streak={liveStreak} variant="header" />
               </div>
-              <div className="text-xs text-slate-400 truncate flex items-center gap-1.5">
+              <div className="text-xs text-[var(--nx-text-secondary)] truncate flex items-center gap-1.5">
                 {activeTyping ? (
-                  <span className="text-cyan-300 font-medium">Typing...</span>
+                  <span className="text-violet-600 dark:text-cyan-300 font-medium">Typing...</span>
                 ) : (
                   <>
                     <span>{conversation.subtitle}</span>
@@ -1301,7 +1318,10 @@ export function ChatWindow({
                       }
                       onClickVerify={
                         conversation.type === 'private' && conversation.peerUser
-                          ? () => setShowSafetyModal(true)
+                          ? () => {
+                              audioManager.play('ui.glass_open');
+                              setShowSafetyModal(true);
+                            }
                           : undefined
                       }
                     />
@@ -1311,14 +1331,19 @@ export function ChatWindow({
             </div>
           </div>
 
-          <div className="flex items-center gap-1 shrink-0 relative">
+          <div className="flex items-center gap-1 shrink-0 relative z-10">
             <button
               type="button"
-              onClick={() => setShowSearch((s) => !s)}
+              onClick={() => {
+                audioManager.play('ui.glass_touch');
+                setShowSearch((s) => !s);
+              }}
               title="Search in conversation"
               aria-label="Search in conversation"
               className={`min-h-[40px] min-w-[40px] rounded-xl flex items-center justify-center transition-colors cursor-pointer ${
-                showSearch ? 'bg-violet-600/25 text-violet-200' : 'text-slate-400 hover:text-white hover:bg-white/5'
+                showSearch
+                  ? 'bg-violet-500/20 text-violet-700 dark:text-violet-200'
+                  : 'text-[var(--nx-text-secondary)] hover:text-[var(--nx-text-primary)] hover:bg-[var(--nx-surface-hover)]'
               }`}
             >
               <Search className="w-4 h-4" />
@@ -1327,13 +1352,16 @@ export function ChatWindow({
             <div className="relative">
               <button
                 type="button"
-                onClick={() => setShowTimerMenu((v) => !v)}
+                onClick={() => {
+                  audioManager.play('ui.menu_open');
+                  setShowTimerMenu((v) => !v);
+                }}
                 title="Disappearing messages timer"
                 aria-label="Disappearing messages timer"
                 className={`min-h-[40px] px-2.5 rounded-xl flex items-center gap-1.5 text-xs transition-colors cursor-pointer ${
                   conversation.disappearingSeconds > 0
-                    ? 'bg-cyan-500/15 text-cyan-300 border border-cyan-500/30'
-                    : 'text-slate-400 hover:text-white hover:bg-white/5'
+                    ? 'bg-sky-500/18 text-sky-700 dark:text-cyan-300 border border-sky-500/35 dark:border-cyan-500/30'
+                    : 'text-[var(--nx-text-secondary)] hover:text-[var(--nx-text-primary)] hover:bg-[var(--nx-surface-hover)]'
                 }`}
               >
                 <Timer className="w-4 h-4" />
@@ -1341,9 +1369,9 @@ export function ChatWindow({
               </button>
 
               {showTimerMenu && (
-                <div className="absolute right-0 mt-2 w-64 nexora-glass rounded-xl p-3 shadow-2xl z-30 space-y-2">
-                  <div className="text-xs font-medium text-white">Disappearing Messages</div>
-                  <p className="text-[11px] text-slate-400 leading-snug">
+                <div className="absolute right-0 mt-2 w-64 nexora-glass-elevated rounded-2xl p-3 shadow-2xl z-30 space-y-2">
+                  <div className="text-xs font-semibold text-[var(--nx-text-primary)]">Disappearing Messages</div>
+                  <p className="text-[11px] text-[var(--nx-text-secondary)] leading-snug">
                     Expired messages are permanently removed from the server. Recipients can still screenshot or capture messages before expiration.
                   </p>
                   <div className="space-y-1 pt-1">
@@ -1354,8 +1382,8 @@ export function ChatWindow({
                         onClick={() => updateDisappearing(opt.seconds)}
                         className={`w-full text-left px-3 py-1.5 rounded-lg text-xs transition-colors cursor-pointer ${
                           conversation.disappearingSeconds === opt.seconds
-                            ? 'bg-violet-600 text-white'
-                            : 'text-slate-300 hover:bg-white/5'
+                            ? 'bg-[#7c5cf6] text-white'
+                            : 'text-[var(--nx-text-secondary)] hover:text-[var(--nx-text-primary)] hover:bg-[var(--nx-surface-hover)]'
                         }`}
                       >
                         {opt.label}
@@ -1369,10 +1397,13 @@ export function ChatWindow({
             {conversation.type === 'private' && conversation.peerUser && (
               <button
                 type="button"
-                onClick={() => setShowSafetyModal(true)}
+                onClick={() => {
+                  audioManager.play('ui.glass_open');
+                  setShowSafetyModal(true);
+                }}
                 title="Verify encryption safety number"
                 aria-label="Verify encryption safety number"
-                className="min-h-[40px] min-w-[40px] rounded-xl text-slate-400 hover:text-cyan-300 hover:bg-white/5 flex items-center justify-center transition-colors cursor-pointer"
+                className="min-h-[40px] min-w-[40px] rounded-xl text-[var(--nx-text-secondary)] hover:text-sky-600 dark:hover:text-cyan-300 hover:bg-[var(--nx-surface-hover)] flex items-center justify-center transition-colors cursor-pointer"
               >
                 <ShieldCheck className="w-4 h-4" />
               </button>
@@ -1381,11 +1412,16 @@ export function ChatWindow({
             {conversation.type === 'group' && (
               <button
                 type="button"
-                onClick={() => setShowGroupDrawer((v) => !v)}
+                onClick={() => {
+                  audioManager.play(showGroupDrawer ? 'ui.glass_close' : 'ui.glass_open');
+                  setShowGroupDrawer((v) => !v);
+                }}
                 title="Group information"
                 aria-label="Group information"
                 className={`min-h-[40px] min-w-[40px] rounded-xl flex items-center justify-center transition-colors cursor-pointer ${
-                  showGroupDrawer ? 'bg-violet-600/25 text-violet-200' : 'text-slate-400 hover:text-white hover:bg-white/5'
+                  showGroupDrawer
+                    ? 'bg-violet-500/20 text-violet-700 dark:text-violet-200'
+                    : 'text-[var(--nx-text-secondary)] hover:text-[var(--nx-text-primary)] hover:bg-[var(--nx-surface-hover)]'
                 }`}
               >
                 <Info className="w-4 h-4" />
@@ -1395,19 +1431,22 @@ export function ChatWindow({
             <div className="relative">
               <button
                 type="button"
-                onClick={() => setShowHeaderMenu((v) => !v)}
+                onClick={() => {
+                  audioManager.play('ui.menu_open');
+                  setShowHeaderMenu((v) => !v);
+                }}
                 aria-label="More conversation actions"
-                className="min-h-[40px] min-w-[40px] rounded-xl text-slate-400 hover:text-white hover:bg-white/5 flex items-center justify-center transition-colors cursor-pointer"
+                className="min-h-[40px] min-w-[40px] rounded-xl text-[var(--nx-text-secondary)] hover:text-[var(--nx-text-primary)] hover:bg-[var(--nx-surface-hover)] flex items-center justify-center transition-colors cursor-pointer"
               >
                 <MoreVertical className="w-4 h-4" />
               </button>
 
               {showHeaderMenu && (
-                <div className="absolute right-0 mt-2 w-48 nexora-glass rounded-xl p-1.5 shadow-2xl z-30 space-y-0.5 text-xs">
+                <div className="absolute right-0 mt-2 w-48 nexora-glass-elevated rounded-2xl p-1.5 shadow-2xl z-30 space-y-0.5 text-xs">
                   <button
                     type="button"
                     onClick={() => toggleMuteOrArchive({ muted: !conversation.muted })}
-                    className="w-full flex items-center gap-2 px-3 py-2 rounded-lg text-slate-200 hover:bg-white/5 cursor-pointer"
+                    className="w-full flex items-center gap-2 px-3 py-2 rounded-lg text-[var(--nx-text-primary)] hover:bg-[var(--nx-surface-hover)] cursor-pointer"
                   >
                     <BellOff className="w-3.5 h-3.5" />
                     <span>{conversation.muted ? 'Unmute conversation' : 'Mute conversation'}</span>
@@ -1415,7 +1454,7 @@ export function ChatWindow({
                   <button
                     type="button"
                     onClick={() => toggleMuteOrArchive({ archived: !conversation.archived })}
-                    className="w-full flex items-center gap-2 px-3 py-2 rounded-lg text-slate-200 hover:bg-white/5 cursor-pointer"
+                    className="w-full flex items-center gap-2 px-3 py-2 rounded-lg text-[var(--nx-text-primary)] hover:bg-[var(--nx-surface-hover)] cursor-pointer"
                   >
                     <Archive className="w-3.5 h-3.5" />
                     <span>{conversation.archived ? 'Unarchive' : 'Archive conversation'}</span>
@@ -1425,7 +1464,7 @@ export function ChatWindow({
                       <button
                         type="button"
                         onClick={handleBlockPeer}
-                        className="w-full flex items-center gap-2 px-3 py-2 rounded-lg text-rose-300 hover:bg-rose-500/10 cursor-pointer"
+                        className="w-full flex items-center gap-2 px-3 py-2 rounded-lg text-rose-600 dark:text-rose-300 hover:bg-rose-500/10 cursor-pointer"
                       >
                         <ShieldBan className="w-3.5 h-3.5" />
                         <span>Block user</span>
@@ -1433,7 +1472,7 @@ export function ChatWindow({
                       <button
                         type="button"
                         onClick={handleReportPeer}
-                        className="w-full flex items-center gap-2 px-3 py-2 rounded-lg text-amber-300 hover:bg-amber-500/10 cursor-pointer"
+                        className="w-full flex items-center gap-2 px-3 py-2 rounded-lg text-amber-600 dark:text-amber-300 hover:bg-amber-500/10 cursor-pointer"
                       >
                         <Flag className="w-3.5 h-3.5" />
                         <span>Report user</span>
@@ -1448,15 +1487,15 @@ export function ChatWindow({
 
         {/* Search in chat bar */}
         {showSearch && (
-          <div className="px-4 py-2 border-b border-white/10 bg-slate-900/70 flex items-center gap-2">
-            <Search className="w-4 h-4 text-slate-400" />
+          <div className="px-4 py-2 border-b border-[var(--nx-hairline)] nexora-glass-subtle flex items-center gap-2">
+            <Search className="w-4 h-4 text-[var(--nx-text-muted)]" />
             <input
               type="text"
               autoFocus
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
               placeholder="Search decrypted messages in this chat..."
-              className="flex-1 bg-transparent text-xs text-white placeholder:text-slate-500 focus:outline-none"
+              className="flex-1 bg-transparent text-xs text-[var(--nx-text-primary)] placeholder:text-[var(--nx-text-muted)] focus:outline-none"
             />
             <button
               type="button"
@@ -1464,7 +1503,7 @@ export function ChatWindow({
                 setShowSearch(false);
                 setSearchQuery('');
               }}
-              className="p-1 text-slate-400 hover:text-white cursor-pointer"
+              className="p-1 text-[var(--nx-text-muted)] hover:text-[var(--nx-text-primary)] cursor-pointer"
             >
               <X className="w-3.5 h-3.5" />
             </button>
@@ -1473,21 +1512,21 @@ export function ChatWindow({
 
         {/* Pinned message banner */}
         {pinnedMessages.length > 0 && (
-          <div className="px-4 py-2 border-b border-white/10 bg-violet-950/35 flex items-center justify-between gap-3 text-xs">
+          <div className="px-4 py-2 border-b border-[var(--nx-hairline)] bg-violet-500/12 dark:bg-violet-950/35 flex items-center justify-between gap-3 text-xs">
             <div className="flex items-center gap-2 min-w-0">
-              <Pin className="w-3.5 h-3.5 text-cyan-400 shrink-0" />
-              <span className="text-slate-300 truncate">
+              <Pin className="w-3.5 h-3.5 text-violet-600 dark:text-cyan-400 shrink-0" />
+              <span className="text-[var(--nx-text-primary)] truncate">
                 Pinned: {pinnedMessages[pinnedMessages.length - 1].localDecrypted?.text || 'Encrypted attachment'}
               </span>
             </div>
-            <span className="text-[11px] font-mono-tabular text-slate-400 shrink-0">
+            <span className="text-[11px] font-mono-tabular text-[var(--nx-text-secondary)] shrink-0">
               {pinnedMessages.length} pinned
             </span>
           </div>
         )}
 
         {errorBanner && (
-          <div className="mx-4 mt-2 rounded-xl bg-rose-500/10 border border-rose-500/30 px-3 py-2 text-xs text-rose-200 flex items-center justify-between">
+          <div className="mx-4 mt-2 rounded-xl bg-rose-500/12 border border-rose-500/30 px-3 py-2 text-xs text-rose-700 dark:text-rose-200 flex items-center justify-between">
             <span>{errorBanner}</span>
             <button type="button" onClick={() => setErrorBanner(null)} className="p-1 cursor-pointer">
               <X className="w-3.5 h-3.5" />
@@ -1497,14 +1536,14 @@ export function ChatWindow({
 
         {/* Message List */}
         <LayoutGroup id={`chat-messages-${conversation.id}`}>
-          <div className="relative flex-1 overflow-y-auto px-4 sm:px-6 py-4 space-y-3">
+          <div className="relative flex-1 overflow-y-auto px-4 sm:px-6 py-4 flex flex-col">
             {hasMore && (
-              <div className="flex justify-center pb-2">
+              <div className="flex justify-center pb-3">
                 <button
                   type="button"
                   disabled={loadingMore}
                   onClick={() => messages[0] && loadMessages(messages[0].createdAt)}
-                  className="px-3.5 py-1.5 rounded-lg bg-slate-800/80 hover:bg-slate-700 text-xs text-slate-300 cursor-pointer"
+                  className="px-4 py-1.5 rounded-full nexora-glass-subtle text-xs text-[var(--nx-text-secondary)] hover:text-[var(--nx-text-primary)] cursor-pointer transition-colors"
                 >
                   {loadingMore ? 'Loading...' : 'Load earlier messages'}
                 </button>
@@ -1527,11 +1566,11 @@ export function ChatWindow({
                     transition={{ duration: 0.2 }}
                     className="h-full flex flex-col items-center justify-center text-center py-12 space-y-3"
                   >
-                    <div className="w-12 h-12 rounded-2xl bg-violet-600/15 border border-violet-500/25 flex items-center justify-center">
-                      <Lock className="w-5 h-5 text-violet-300" />
+                    <div className="w-12 h-12 rounded-2xl nexora-glass-subtle flex items-center justify-center">
+                      <Lock className="w-5 h-5 text-violet-600 dark:text-violet-300" />
                     </div>
-                    <div className="text-sm font-medium text-white">End-to-end encrypted channel ready</div>
-                    <p className="text-xs text-slate-400 max-w-xs">
+                    <div className="text-sm font-medium text-[var(--nx-text-primary)]">End-to-end encrypted channel ready</div>
+                    <p className="text-xs text-[var(--nx-text-secondary)] max-w-xs leading-relaxed">
                       Messages, photos, videos, and voice notes are encrypted on your device with AES-256-GCM before leaving your browser.
                     </p>
                   </motion.div>
@@ -1541,6 +1580,17 @@ export function ChatWindow({
                   const dec = msg.localDecrypted;
                   const isLiveArrival = liveArrivalIds.has(msg.id);
                   const placeTrayBelow = idx === 0;
+                  const prevMsg = idx > 0 ? visibleMessages[idx - 1] : null;
+                  const nextMsg = idx < visibleMessages.length - 1 ? visibleMessages[idx + 1] : null;
+                  const msgTime = Date.parse(msg.createdAt) || 0;
+                  const isFirstInGroup =
+                    !prevMsg ||
+                    prevMsg.senderId !== msg.senderId ||
+                    msgTime - (Date.parse(prevMsg.createdAt) || 0) > 180_000;
+                  const isLastInGroup =
+                    !nextMsg ||
+                    nextMsg.senderId !== msg.senderId ||
+                    (Date.parse(nextMsg.createdAt) || 0) - msgTime > 180_000;
 
                   return (
                     <motion.div
@@ -1551,10 +1601,9 @@ export function ChatWindow({
                           ? false
                           : {
                               opacity: 0,
-                              x: isMine ? 22 : -22,
-                              y: 18,
-                              scale: 0.92,
-                              filter: 'blur(4px)',
+                              x: isMine ? 16 : -16,
+                              y: 12,
+                              scale: 0.95,
                             }
                       }
                       animate={{
@@ -1562,17 +1611,15 @@ export function ChatWindow({
                         x: 0,
                         y: 0,
                         scale: 1,
-                        filter: 'blur(0px)',
                       }}
                       exit={
                         prefersReducedMotion
                           ? undefined
                           : {
                               opacity: 0,
-                              scale: 0.9,
-                              y: -8,
-                              filter: 'blur(4px)',
-                              transition: { duration: 0.18, ease: 'easeOut' },
+                              scale: 0.92,
+                              y: -6,
+                              transition: { duration: 0.16, ease: 'easeOut' },
                             }
                       }
                       transition={
@@ -1580,23 +1627,24 @@ export function ChatWindow({
                           ? { duration: 0 }
                           : {
                               layout: { type: 'spring', stiffness: 360, damping: 30, mass: 0.85 },
-                              opacity: { duration: 0.24, ease: [0.16, 1, 0.3, 1] },
-                              filter: { duration: 0.28 },
-                              default: { type: 'spring', stiffness: 380, damping: 26, mass: 0.8 },
+                              opacity: { duration: 0.2, ease: [0.16, 1, 0.3, 1] },
+                              default: { type: 'spring', stiffness: 380, damping: 28, mass: 0.8 },
                             }
                       }
                       style={{ transformOrigin: isMine ? 'bottom right' : 'bottom left' }}
                       className={`flex flex-col ${isMine ? 'items-end' : 'items-start'} group relative ${
+                        idx === 0 ? '' : isFirstInGroup ? 'mt-3.5' : 'mt-1'
+                      } ${
                         reactMsgId === msg.id || activeMenuMsgId === msg.id ? 'z-30' : ''
                       }`}
                     >
-                      {conversation.type === 'group' && !isMine && (
-                        <span className="text-[11px] text-slate-400 ml-1 mb-1">
+                      {conversation.type === 'group' && !isMine && isFirstInGroup && (
+                        <span className="text-[11px] text-[var(--nx-text-secondary)] ml-1 mb-1 font-medium">
                           @{msg.senderUsername}
                         </span>
                       )}
 
-                      <div className={`relative flex items-end gap-2 max-w-[85%] sm:max-w-[70%] ${isMine ? 'flex-row-reverse' : ''}`}>
+                      <div className={`relative flex items-end gap-2 max-w-[92%] sm:max-w-[78%] ${isMine ? 'flex-row-reverse' : ''}`}>
                         <AnimatePresence>
                           {reactMsgId === msg.id && !msg.deletedForEveryone && (
                             <motion.div
@@ -1617,7 +1665,7 @@ export function ChatWindow({
                                 placeTrayBelow ? 'top-full mt-2' : 'bottom-full mb-2'
                               } ${
                                 isMine ? 'right-0' : 'left-0'
-                              } nexora-glass rounded-2xl px-2 py-1.5 flex items-center gap-1 z-30 shadow-[0_12px_32px_rgba(3,7,18,0.65)] border border-violet-400/30`}
+                              } nexora-glass-elevated rounded-2xl px-2 py-1.5 flex items-center gap-1 z-30 border border-violet-400/35`}
                             >
                               {REACTION_EMOJIS.map((em) => {
                                 const isSelected = msg.reactions.some(
@@ -1634,8 +1682,8 @@ export function ChatWindow({
                                     aria-pressed={isSelected}
                                     className={`w-8 h-8 rounded-xl text-base flex items-center justify-center transition-colors cursor-pointer ${
                                       isSelected
-                                        ? 'bg-violet-500/35 ring-1 ring-violet-300/60 shadow-[0_0_10px_rgba(139,92,246,0.35)]'
-                                        : 'hover:bg-white/10'
+                                        ? 'bg-violet-500/30 ring-1 ring-violet-400/70'
+                                        : 'hover:bg-[var(--nx-surface-hover)]'
                                     }`}
                                   >
                                     {em}
@@ -1645,7 +1693,7 @@ export function ChatWindow({
                               <span
                                 title="Reactions are end-to-end encrypted"
                                 aria-label="End-to-end encrypted reactions"
-                                className="pl-1 pr-0.5 text-cyan-300/80 flex items-center"
+                                className="pl-1 pr-0.5 text-sky-600 dark:text-cyan-300/80 flex items-center"
                               >
                                 <Lock className="w-3 h-3" />
                               </span>
@@ -1653,7 +1701,11 @@ export function ChatWindow({
                           )}
                         </AnimatePresence>
 
-                        <div
+                        <GlassMessageBubble
+                          isMine={isMine}
+                          deleted={msg.deletedForEveryone}
+                          isFirstInGroup={isFirstInGroup}
+                          isLastInGroup={isLastInGroup}
                           data-cursor-interactive={msg.deletedForEveryone ? undefined : 'true'}
                           onPointerDown={(e) => handleBubblePointerDown(e, msg)}
                           onPointerMove={handleBubblePointerMove}
@@ -1668,32 +1720,26 @@ export function ChatWindow({
                             setReactMsgId((cur) => (cur === msg.id ? null : msg.id));
                           }}
                           title={msg.deletedForEveryone ? undefined : 'Long-press or click smile to add an encrypted reaction'}
-                          className={`rounded-2xl px-4 py-2.5 text-sm leading-relaxed relative overflow-hidden transition-[box-shadow,transform] duration-150 select-none sm:select-text touch-pan-y ${
-                            msg.deletedForEveryone
-                              ? 'bg-slate-900/60 border border-white/10 text-slate-500 italic'
-                              : isMine
-                              ? 'bg-gradient-to-br from-violet-600 to-indigo-600 text-white shadow-sm'
-                              : 'bg-[#141a33] border border-white/10 text-slate-100'
-                          } ${
+                          highlightClassName={
                             pressingMsgId === msg.id
-                              ? 'scale-[0.97] ring-2 ring-cyan-400/60 shadow-[0_0_20px_rgba(34,211,238,0.28)]'
+                              ? 'scale-[0.97] ring-2 ring-sky-300/60'
                               : replyTarget?.id === msg.id
-                              ? 'ring-2 ring-violet-400/65 shadow-[0_0_18px_rgba(139,92,246,0.28)]'
+                              ? 'ring-2 ring-violet-300/65'
                               : msg.isPinned && !msg.deletedForEveryone
-                              ? 'ring-1 ring-cyan-400/45 shadow-[0_0_16px_rgba(34,211,238,0.16)]'
+                              ? 'ring-1 ring-sky-300/45'
                               : ''
-                          }`}
+                          }
                         >
                           {(isLiveArrival || lastConfirmedMsgId === msg.id) &&
                             !prefersReducedMotion &&
                             !msg.deletedForEveryone && (
                               <motion.span
-                                initial={{ x: '-120%', opacity: 0.8 }}
+                                initial={{ x: '-120%', opacity: 0.7 }}
                                 animate={{ x: '140%', opacity: 0 }}
-                                transition={{ duration: 0.85, ease: [0.16, 1, 0.3, 1] }}
+                                transition={{ duration: 0.75, ease: [0.16, 1, 0.3, 1] }}
                                 aria-hidden="true"
                                 className={`pointer-events-none absolute inset-y-0 w-2/3 bg-gradient-to-r from-transparent ${
-                                  isMine ? 'via-white/30' : 'via-cyan-300/25'
+                                  isMine ? 'via-white/25' : 'via-sky-300/20'
                                 } to-transparent`}
                               />
                             )}
@@ -1705,9 +1751,15 @@ export function ChatWindow({
                       )}
 
                       {dec?.replyToId && !msg.deletedForEveryone && (
-                        <div className="mb-2 px-2.5 py-1.5 rounded-lg bg-black/25 border border-white/10 text-xs">
-                          <div className="font-medium opacity-85">{dec.replySenderName || 'Reply'}</div>
-                          <div className="opacity-70 truncate max-w-[220px]">{dec.replyPreview}</div>
+                        <div
+                          className={`mb-2 px-2.5 py-1.5 rounded-lg border text-xs ${
+                            isMine
+                              ? 'bg-black/20 border-white/20 text-white'
+                              : 'bg-white/50 dark:bg-black/25 border-white/60 dark:border-white/10'
+                          }`}
+                        >
+                          <div className="font-medium opacity-90">{dec.replySenderName || 'Reply'}</div>
+                          <div className="opacity-75 truncate max-w-[220px]">{dec.replyPreview}</div>
                         </div>
                       )}
 
@@ -1721,18 +1773,25 @@ export function ChatWindow({
                               kind={msg.kind}
                               payload={dec}
                               isMine={isMine}
-                              onOpenLightbox={(url, mimeType, fileName) =>
-                                setLightbox({ url, mimeType, fileName })
-                              }
+                              onOpenLightbox={(url, mimeType, fileName) => {
+                                audioManager.play('media.preview_open');
+                                setLightbox({ url, mimeType, fileName });
+                              }}
                             />
                           )}
                           {dec?.text && <div className="whitespace-pre-wrap break-words">{dec.text}</div>}
                         </div>
                       )}
 
-                      <div className="mt-1.5 flex items-center justify-end gap-1.5 text-[10px] opacity-75 font-mono-tabular">
+                      <div className="mt-1.5 flex items-center justify-end gap-1.5 text-[10px] opacity-80 font-mono-tabular">
                         {msg.isPinned && <Pin className="w-2.5 h-2.5" />}
-                        {msg.expiresAt && <Timer className="w-2.5 h-2.5 text-cyan-300" />}
+                        {msg.expiresAt && (
+                          <Timer
+                            className={`w-2.5 h-2.5 ${
+                              isMine ? 'text-cyan-200' : 'text-sky-600 dark:text-cyan-300'
+                            }`}
+                          />
+                        )}
                         {msg.isEdited && <span>Edited</span>}
                         <span>
                           {new Date(msg.createdAt).toLocaleTimeString([], {
@@ -1796,19 +1855,29 @@ export function ChatWindow({
                           </span>
                         )}
                       </div>
-                    </div>
+                    </GlassMessageBubble>
+
+                    <time
+                      dateTime={msg.createdAt}
+                      title={formatFullTimestamp(msg.createdAt)}
+                      data-testid="message-relative-time"
+                      className="text-[10px] text-[var(--nx-text-muted)] whitespace-nowrap shrink-0 pb-1 font-mono-tabular select-none"
+                    >
+                      {formatRelativeTimestamp(msg.createdAt, nowMs)}
+                    </time>
 
                     {!msg.deletedForEveryone && (
-                      <div className="relative opacity-0 group-hover:opacity-100 focus-within:opacity-100 transition-opacity flex items-center gap-0.5">
+                      <div className="relative opacity-0 group-hover:opacity-100 focus-within:opacity-100 transition-opacity flex items-center gap-0.5 shrink-0">
                         <button
                           type="button"
                           data-reaction-trigger="true"
                           onClick={() => {
+                            audioManager.play('ui.menu_open');
                             setActiveMenuMsgId(null);
                             setReactMsgId(reactMsgId === msg.id ? null : msg.id);
                           }}
                           aria-label="React to message"
-                          className="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-white/5 cursor-pointer"
+                          className="p-1.5 rounded-lg text-[var(--nx-text-muted)] hover:text-[var(--nx-text-primary)] hover:bg-[var(--nx-surface-hover)] cursor-pointer"
                         >
                           <Smile className="w-3.5 h-3.5" />
                         </button>
@@ -1816,25 +1885,27 @@ export function ChatWindow({
                           type="button"
                           data-reaction-trigger="true"
                           onClick={() => {
+                            audioManager.play('ui.menu_open');
                             setReactMsgId(null);
                             setActiveMenuMsgId(activeMenuMsgId === msg.id ? null : msg.id);
                           }}
                           aria-label="Message options"
-                          className="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-white/5 cursor-pointer"
+                          className="p-1.5 rounded-lg text-[var(--nx-text-muted)] hover:text-[var(--nx-text-primary)] hover:bg-[var(--nx-surface-hover)] cursor-pointer"
                         >
                           <MoreVertical className="w-3.5 h-3.5" />
                         </button>
 
                         {activeMenuMsgId === msg.id && (
-                          <div className="absolute bottom-8 right-0 w-44 nexora-glass rounded-xl p-1.5 z-20 shadow-2xl text-xs space-y-0.5">
+                          <div className="absolute bottom-8 right-0 w-44 nexora-glass-elevated rounded-2xl p-1.5 z-20 shadow-2xl text-xs space-y-0.5">
                             <button
                               type="button"
                               onClick={() => {
+                                audioManager.play('message.reply');
                                 setReplyTarget(msg);
                                 setEditTarget(null);
                                 setActiveMenuMsgId(null);
                               }}
-                              className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-slate-200 hover:bg-white/5 cursor-pointer"
+                              className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-[var(--nx-text-primary)] hover:bg-[var(--nx-surface-hover)] cursor-pointer"
                             >
                               <Reply className="w-3.5 h-3.5" />
                               <span>Reply</span>
@@ -1843,10 +1914,11 @@ export function ChatWindow({
                               <button
                                 type="button"
                                 onClick={() => {
+                                  audioManager.play('message.copy');
                                   navigator.clipboard.writeText(dec.text);
                                   setActiveMenuMsgId(null);
                                 }}
-                                className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-slate-200 hover:bg-white/5 cursor-pointer"
+                                className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-[var(--nx-text-primary)] hover:bg-[var(--nx-surface-hover)] cursor-pointer"
                               >
                                 <Copy className="w-3.5 h-3.5" />
                                 <span>Copy text</span>
@@ -1855,18 +1927,22 @@ export function ChatWindow({
                             <button
                               type="button"
                               onClick={() => {
+                                audioManager.play('ui.glass_open');
                                 setForwardTarget(msg);
                                 setActiveMenuMsgId(null);
                               }}
-                              className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-slate-200 hover:bg-white/5 cursor-pointer"
+                              className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-[var(--nx-text-primary)] hover:bg-[var(--nx-surface-hover)] cursor-pointer"
                             >
                               <Forward className="w-3.5 h-3.5" />
                               <span>Forward</span>
                             </button>
                             <button
                               type="button"
-                              onClick={() => togglePin(msg)}
-                              className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-slate-200 hover:bg-white/5 cursor-pointer"
+                              onClick={() => {
+                                audioManager.play('ui.glass_touch');
+                                togglePin(msg);
+                              }}
+                              className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-[var(--nx-text-primary)] hover:bg-[var(--nx-surface-hover)] cursor-pointer"
                             >
                               <Pin className="w-3.5 h-3.5" />
                               <span>{msg.isPinned ? 'Unpin' : 'Pin message'}</span>
@@ -1875,12 +1951,13 @@ export function ChatWindow({
                               <button
                                 type="button"
                                 onClick={() => {
+                                  audioManager.play('ui.glass_touch');
                                   setEditTarget(msg);
                                   setReplyTarget(null);
                                   setText(dec?.text || '');
                                   setActiveMenuMsgId(null);
                                 }}
-                                className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-slate-200 hover:bg-white/5 cursor-pointer"
+                                className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-[var(--nx-text-primary)] hover:bg-[var(--nx-surface-hover)] cursor-pointer"
                               >
                                 <Edit3 className="w-3.5 h-3.5" />
                                 <span>Edit</span>
@@ -1889,7 +1966,7 @@ export function ChatWindow({
                             <button
                               type="button"
                               onClick={() => deleteMessage(msg.id, 'delete_for_me')}
-                              className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-slate-300 hover:bg-white/5 cursor-pointer"
+                              className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-[var(--nx-text-secondary)] hover:bg-[var(--nx-surface-hover)] cursor-pointer"
                             >
                               <Trash2 className="w-3.5 h-3.5" />
                               <span>Delete for me</span>
@@ -1898,7 +1975,7 @@ export function ChatWindow({
                               <button
                                 type="button"
                                 onClick={() => deleteMessage(msg.id, 'delete_for_everyone')}
-                                className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-rose-300 hover:bg-rose-500/10 cursor-pointer"
+                                className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-rose-600 dark:text-rose-300 hover:bg-rose-500/10 cursor-pointer"
                               >
                                 <Trash2 className="w-3.5 h-3.5" />
                                 <span>Delete for everyone</span>
@@ -1927,8 +2004,8 @@ export function ChatWindow({
                           onClick={() => toggleReaction(msg.id, r.emoji)}
                           className={`relative px-2 py-0.5 rounded-lg text-xs border transition-colors cursor-pointer ${
                             r.userIds.includes(currentUserId)
-                              ? 'bg-violet-600/30 border-violet-400/50 text-white shadow-[0_0_10px_rgba(139,92,246,0.22)]'
-                              : 'bg-slate-900/80 border-white/10 text-slate-300'
+                              ? 'bg-violet-500/25 border-violet-500/50 dark:border-violet-400/50 text-violet-900 dark:text-white shadow-[0_0_10px_rgba(139,92,246,0.2)]'
+                              : 'nexora-glass-subtle text-[var(--nx-text-secondary)]'
                           }`}
                         >
                           {r.emoji} <span className="font-mono-tabular text-[11px]">{r.count}</span>
@@ -1958,7 +2035,7 @@ export function ChatWindow({
                     }
                     className="flex items-start"
                   >
-                    <div className="rounded-2xl px-3.5 py-2.5 bg-[#141a33]/90 border border-cyan-400/20 inline-flex items-center gap-1.5">
+                    <div className="rounded-2xl px-3.5 py-2.5 nexora-glass-bubble-in inline-flex items-center gap-1.5">
                       {[0, 1, 2].map((dot) => (
                         <motion.span
                           key={dot}
@@ -1973,7 +2050,7 @@ export function ChatWindow({
                             delay: dot * 0.16,
                             ease: 'easeInOut',
                           }}
-                          className="w-1.5 h-1.5 rounded-full bg-cyan-300"
+                          className="w-1.5 h-1.5 rounded-full bg-violet-500 dark:bg-cyan-300"
                         />
                       ))}
                     </div>
@@ -1985,26 +2062,26 @@ export function ChatWindow({
           </div>
         </LayoutGroup>
 
-        {/* Composer */}
-        <footer className="relative px-4 sm:px-6 py-3 border-t border-white/10 bg-[#0b0f1f]/85 backdrop-blur-md space-y-2 shrink-0">
+        {/* Floating Pill-Shaped Liquid Glass Message Composer */}
+        <footer className="relative px-3 sm:px-5 pt-2 pb-safe md:pb-3.5 space-y-2 shrink-0">
           <AnimatePresence>
             {uploadProgress && (
               <motion.div
                 initial={prefersReducedMotion ? false : { opacity: 0, y: 6 }}
                 animate={{ opacity: 1, y: 0 }}
                 exit={prefersReducedMotion ? undefined : { opacity: 0, y: 4 }}
-                className="space-y-1.5"
+                className="nexora-glass-subtle rounded-2xl px-3.5 py-2 space-y-1.5"
               >
-                <div className="text-xs text-cyan-300 flex items-center gap-2">
+                <div className="text-xs text-violet-700 dark:text-sky-300 flex items-center gap-2">
                   <FileUp className="w-3.5 h-3.5 animate-pulse" />
                   <span>{uploadProgress}</span>
                 </div>
-                <div className="h-1 w-full rounded-full bg-slate-800/80 overflow-hidden">
+                <div className="h-1 w-full rounded-full bg-black/10 dark:bg-white/10 overflow-hidden">
                   <motion.div
                     initial={{ x: '-100%' }}
                     animate={prefersReducedMotion ? { x: '0%' } : { x: ['-60%', '100%'] }}
                     transition={{ duration: 1.3, repeat: Infinity, ease: 'easeInOut' }}
-                    className="h-full w-1/2 rounded-full bg-gradient-to-r from-violet-500 via-cyan-400 to-violet-500"
+                    className="h-full w-1/2 rounded-full bg-gradient-to-r from-violet-400 via-sky-300 to-violet-400"
                   />
                 </div>
               </motion.div>
@@ -2018,13 +2095,13 @@ export function ChatWindow({
                 animate={{ opacity: 1, y: 0, scale: 1 }}
                 exit={prefersReducedMotion ? undefined : { opacity: 0, y: 6, scale: 0.98 }}
                 transition={{ duration: prefersReducedMotion ? 0 : 0.18 }}
-                className="flex items-center justify-between gap-3 px-3 py-2 rounded-xl bg-slate-900/90 border border-violet-500/35 text-xs shadow-[0_0_16px_rgba(124,58,237,0.16)]"
+                className="flex items-center justify-between gap-3 px-4 py-2.5 rounded-2xl nexora-glass text-xs"
               >
                 <div className="min-w-0">
-                  <div className="font-medium text-violet-300">
+                  <div className="font-medium text-violet-700 dark:text-violet-200">
                     {editTarget ? 'Editing encrypted message' : `Replying to ${replyTarget?.senderDisplayName}`}
                   </div>
-                  <div className="text-slate-400 truncate">
+                  <div className="text-[var(--nx-text-secondary)] truncate">
                     {(editTarget || replyTarget)?.localDecrypted?.text || 'Attachment'}
                   </div>
                 </div>
@@ -2035,7 +2112,8 @@ export function ChatWindow({
                     setEditTarget(null);
                     setText('');
                   }}
-                  className="p-1 text-slate-400 hover:text-white cursor-pointer"
+                  aria-label="Cancel reply or edit"
+                  className="p-1.5 rounded-full hover:bg-[var(--nx-surface-hover)] text-[var(--nx-text-secondary)] hover:text-[var(--nx-text-primary)] cursor-pointer"
                 >
                   <X className="w-4 h-4" />
                 </button>
@@ -2043,70 +2121,124 @@ export function ChatWindow({
             )}
           </AnimatePresence>
 
-          <form onSubmit={handleSendText} className="flex items-center gap-2">
-            <input
-              ref={fileInputRef}
-              type="file"
-              accept="image/*,video/*,audio/*,.pdf,.txt,.zip"
-              onChange={handleFilePicked}
-              className="hidden"
-            />
-            <button
-              type="button"
-              onClick={() => fileInputRef.current?.click()}
-              title="Attach encrypted photo, video, or file"
-              aria-label="Attach media or document"
-              className="min-h-[40px] min-w-[40px] rounded-xl bg-slate-800/75 hover:bg-slate-700 border border-white/10 text-slate-300 hover:text-white flex items-center justify-center transition-colors cursor-pointer shrink-0"
-            >
-              <Paperclip className="w-4 h-4" />
-            </button>
-
-            <input
-              type="text"
-              value={text}
-              onChange={(e) => handleTypingChange(e.target.value)}
-              placeholder={editTarget ? 'Update message...' : 'Write an encrypted message...'}
-              className="flex-1 h-10 px-4 rounded-xl bg-slate-900/85 border border-white/10 text-sm text-white placeholder:text-slate-500 focus:outline-none focus:border-violet-500 transition-colors"
-            />
-
-            {text.trim() ? (
-              <div className="relative shrink-0">
-                {sendConfirmBurstKey && !prefersReducedMotion && (
-                  <motion.span
-                    key={sendConfirmBurstKey}
-                    initial={{ scale: 0.7, opacity: 0.75 }}
-                    animate={{ scale: 1.8, opacity: 0 }}
-                    transition={{ duration: 0.5, ease: [0.16, 1, 0.3, 1] }}
-                    aria-hidden="true"
-                    className="pointer-events-none absolute inset-0 rounded-xl border border-cyan-300/80"
-                  />
-                )}
-                <motion.button
-                  type="submit"
-                  disabled={sending}
-                  whileTap={prefersReducedMotion ? undefined : { scale: 0.94 }}
-                  aria-label="Send encrypted message"
-                  className="relative z-10 min-h-[40px] px-4 rounded-xl bg-violet-600 hover:bg-violet-500 disabled:opacity-50 text-white text-sm font-medium inline-flex items-center gap-1.5 shadow-[0_0_16px_rgba(124,58,237,0.3)] transition-colors cursor-pointer"
-                >
-                  <Send className="w-4 h-4" />
-                  <span className="hidden sm:inline">{editTarget ? 'Save' : 'Send'}</span>
-                </motion.button>
-              </div>
-            ) : (
-              <div className="relative shrink-0">
-                {sendConfirmBurstKey && !prefersReducedMotion && (
-                  <motion.span
-                    key={sendConfirmBurstKey}
-                    initial={{ scale: 0.7, opacity: 0.75 }}
-                    animate={{ scale: 1.8, opacity: 0 }}
-                    transition={{ duration: 0.5, ease: [0.16, 1, 0.3, 1] }}
-                    aria-hidden="true"
-                    className="pointer-events-none absolute inset-0 rounded-xl border border-cyan-300/80"
-                  />
-                )}
-                <VoiceRecorder onSendVoice={handleSendVoice} disabled={Boolean(uploadProgress)} />
-              </div>
+          <AnimatePresence>
+            {showComposerEmoji && (
+              <motion.div
+                initial={prefersReducedMotion ? false : { opacity: 0, y: 8, scale: 0.96 }}
+                animate={{ opacity: 1, y: 0, scale: 1 }}
+                exit={prefersReducedMotion ? undefined : { opacity: 0, y: 6, scale: 0.96 }}
+                transition={{ duration: 0.16 }}
+                className="nexora-glass-elevated rounded-2xl p-2 flex flex-wrap items-center gap-1 w-fit"
+              >
+                {COMPOSER_EMOJIS.map((em) => (
+                  <button
+                    key={em}
+                    type="button"
+                    onClick={() => {
+                      audioManager.play('ui.glass_touch');
+                      handleTypingChange(`${text}${em}`);
+                      setShowComposerEmoji(false);
+                      composerInputRef.current?.focus();
+                    }}
+                    className="w-9 h-9 rounded-xl hover:bg-[var(--nx-surface-hover)] text-base flex items-center justify-center transition-colors cursor-pointer"
+                  >
+                    {em}
+                  </button>
+                ))}
+              </motion.div>
             )}
+          </AnimatePresence>
+
+          <form onSubmit={handleSendText}>
+            <GlassComposer>
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept="image/*,video/*,audio/*,.pdf,.txt,.zip"
+                onChange={handleFilePicked}
+                className="hidden"
+              />
+              <button
+                type="button"
+                onClick={() => {
+                  audioManager.play('media.menu_open');
+                  fileInputRef.current?.click();
+                }}
+                title="Attach encrypted photo, video, or file"
+                aria-label="Attach media or document"
+                className="min-h-[40px] min-w-[40px] rounded-full hover:bg-[var(--nx-surface-hover)] text-[var(--nx-text-secondary)] hover:text-[var(--nx-text-primary)] flex items-center justify-center transition-colors cursor-pointer shrink-0"
+              >
+                <Paperclip className="w-[18px] h-[18px]" />
+              </button>
+
+              <button
+                type="button"
+                onClick={() => {
+                  audioManager.play('media.menu_open');
+                  setShowComposerEmoji((v) => !v);
+                }}
+                title="Insert emoji"
+                aria-label="Insert emoji"
+                className={`min-h-[40px] min-w-[40px] rounded-full flex items-center justify-center transition-colors cursor-pointer shrink-0 ${
+                  showComposerEmoji
+                    ? 'bg-violet-500/20 text-violet-700 dark:text-violet-200'
+                    : 'hover:bg-[var(--nx-surface-hover)] text-[var(--nx-text-secondary)] hover:text-[var(--nx-text-primary)]'
+                }`}
+              >
+                <Smile className="w-[18px] h-[18px]" />
+              </button>
+
+              <textarea
+                ref={composerInputRef}
+                rows={1}
+                value={text}
+                onChange={(e) => {
+                  handleTypingChange(e.target.value);
+                  const el = e.currentTarget;
+                  el.style.height = 'auto';
+                  el.style.height = `${Math.min(el.scrollHeight, 120)}px`;
+                }}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' && !e.shiftKey) {
+                    e.preventDefault();
+                    if (text.trim() && !sending) {
+                      e.currentTarget.form?.requestSubmit();
+                    }
+                  }
+                }}
+                placeholder={editTarget ? 'Update message...' : 'Message...'}
+                className="flex-1 min-h-[38px] max-h-[120px] py-2 px-2 bg-transparent text-sm text-[var(--nx-text-primary)] placeholder:text-[var(--nx-text-muted)] focus:outline-none resize-none leading-snug"
+              />
+
+              {text.trim() ? (
+                <div className="relative shrink-0">
+                  {sendConfirmBurstKey && !prefersReducedMotion && (
+                    <motion.span
+                      key={sendConfirmBurstKey}
+                      initial={{ scale: 0.7, opacity: 0.75 }}
+                      animate={{ scale: 1.7, opacity: 0 }}
+                      transition={{ duration: 0.45, ease: [0.16, 1, 0.3, 1] }}
+                      aria-hidden="true"
+                      className="pointer-events-none absolute inset-0 rounded-full border border-violet-300/80"
+                    />
+                  )}
+                  <motion.button
+                    type="submit"
+                    disabled={sending}
+                    whileTap={prefersReducedMotion ? undefined : { scale: 0.92 }}
+                    aria-label="Send encrypted message"
+                    className="relative z-10 min-h-[40px] px-4 rounded-full bg-gradient-to-br from-[#7c5cf6] to-[#566ee6] hover:from-[#896cf8] hover:to-[#667deb] disabled:opacity-50 text-white text-xs font-medium inline-flex items-center gap-1.5 shadow-[inset_0_1px_0_rgba(255,255,255,0.25),0_6px_16px_rgba(88,80,236,0.3)] transition-all cursor-pointer"
+                  >
+                    <Send className="w-3.5 h-3.5" />
+                    <span className="hidden sm:inline">{editTarget ? 'Save' : 'Send'}</span>
+                  </motion.button>
+                </div>
+              ) : (
+                <div className="relative shrink-0">
+                  <VoiceRecorder onSendVoice={handleSendVoice} disabled={Boolean(uploadProgress)} />
+                </div>
+              )}
+            </GlassComposer>
           </form>
         </footer>
       </div>
@@ -2136,7 +2268,10 @@ export function ChatWindow({
             url={lightbox.url}
             mimeType={lightbox.mimeType}
             fileName={lightbox.fileName}
-            onClose={() => setLightbox(null)}
+            onClose={() => {
+              audioManager.play('media.preview_close');
+              setLightbox(null);
+            }}
           />
         )}
       </AnimatePresence>

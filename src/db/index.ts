@@ -25,6 +25,17 @@ function shouldUseSsl(host: string | undefined): boolean {
   return true;
 }
 
+export function isTransientSqlDisconnect(err: unknown): boolean {
+  const errObj = err as { code?: string; message?: string; cause?: { code?: string; message?: string } } | null | undefined;
+  const code = errObj?.code || errObj?.cause?.code || '';
+  const msg = errObj?.message || errObj?.cause?.message || '';
+  return (
+    ['ECONNRESET', 'EPIPE', 'ETIMEDOUT', 'ECONNABORTED', '57P01', '57P02', '57P03', '08000', '08003', '08006'].includes(
+      code
+    ) || /Connection terminated|terminating connection|socket hang up|ECONNRESET/i.test(msg)
+  );
+}
+
 export const createPool = () => {
   if (!global._postgresPool) {
     const host = cleanEnv(process.env.SQL_HOST);
@@ -41,11 +52,19 @@ export const createPool = () => {
       database,
       ...(shouldUseSsl(host) ? { ssl: { rejectUnauthorized: false } } : {}),
       max: 10,
-      connectionTimeoutMillis: 15000,
+      idleTimeoutMillis: 10_000,
+      connectionTimeoutMillis: 15_000,
+      keepAlive: true,
+      keepAliveInitialDelayMillis: 10_000,
+      allowExitOnIdle: true,
     });
 
     global._postgresPool.on('error', (err) => {
-      console.error('Unexpected error on idle SQL pool client:', err);
+      // pg-pool automatically evicts broken idle clients and reconnects on the next query.
+      if (isTransientSqlDisconnect(err)) {
+        return;
+      }
+      console.error('SQL pool error:', err instanceof Error ? err.message : String(err));
     });
   }
   return global._postgresPool;

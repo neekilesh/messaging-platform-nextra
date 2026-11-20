@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
 import express from 'express';
-import { db } from './src/db/index.ts';
+import { db, isTransientSqlDisconnect } from './src/db/index.ts';
 import { createApiApp, runRetentionCleanup } from './server/app.ts';
 import { setupSocketServer } from './server/socket.ts';
 import { setupLiveVoiceWebSocket } from './server/live-ws.ts';
@@ -30,11 +30,20 @@ async function startServer() {
   setupSocketServer(httpServer, db);
   setupLiveVoiceWebSocket(httpServer, db);
 
+  let cleanupInFlight = false;
   const cleanupTimer = setInterval(() => {
-    runRetentionCleanup(db).catch((err) => {
-      console.error('Retention cleanup error:', err);
-    });
-  }, 5_000);
+    if (cleanupInFlight) return;
+    cleanupInFlight = true;
+    runRetentionCleanup(db)
+      .catch((err) => {
+        if (!isTransientSqlDisconnect(err)) {
+          console.error('Retention cleanup error:', err);
+        }
+      })
+      .finally(() => {
+        cleanupInFlight = false;
+      });
+  }, 10_000);
   cleanupTimer.unref();
 
   const isProd = process.env.NODE_ENV === 'production';

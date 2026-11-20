@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { Download, FileText, Maximize2 } from 'lucide-react';
+import { audioManager } from '../../audio/AudioManager';
 import { fetchEncryptedMediaBytes } from '../../lib/api';
 import { decryptMediaBlob } from '../../lib/crypto';
 import type { DecryptedMessagePayload, MessageKind } from '../../types/nexora';
@@ -69,7 +70,11 @@ export function EncryptedMediaRenderer({
   }
 
   if (error || !objectUrl) {
-    return <div className="text-xs text-rose-300 py-1">{error || 'Media unavailable'}</div>;
+    return (
+      <div className={`text-xs py-1 ${isMine ? 'text-rose-100' : 'text-rose-600 dark:text-rose-300'}`}>
+        {error || 'Media unavailable'}
+      </div>
+    );
   }
 
   if (kind === 'voice') {
@@ -85,7 +90,7 @@ export function EncryptedMediaRenderer({
 
   if (kind === 'image') {
     return (
-      <div className="relative group overflow-hidden rounded-xl max-w-xs sm:max-w-sm border border-cyan-400/20 shadow-[0_0_20px_rgba(34,211,238,0.12)] hover:border-cyan-300/45 transition-colors">
+      <div className="relative group overflow-hidden rounded-xl max-w-xs sm:max-w-sm border border-white/40 dark:border-cyan-400/20 shadow-[0_8px_22px_rgba(30,24,70,0.16)] transition-colors">
         <img
           src={objectUrl}
           alt={payload.fileName || 'Encrypted photo'}
@@ -106,12 +111,12 @@ export function EncryptedMediaRenderer({
 
   if (kind === 'video') {
     return (
-      <div className="relative max-w-xs sm:max-w-sm rounded-xl overflow-hidden bg-black/40 border border-violet-400/25 shadow-[0_0_20px_rgba(139,92,246,0.14)]">
+      <div className="relative max-w-xs sm:max-w-sm rounded-xl overflow-hidden bg-black/75 border border-violet-400/30 shadow-[0_8px_22px_rgba(30,24,70,0.18)]">
         <video src={objectUrl} controls className="max-h-72 w-full rounded-xl" />
         <button
           type="button"
           onClick={() => onOpenLightbox(objectUrl, payload.mimeType || 'video/mp4', payload.fileName)}
-          className="mt-1.5 px-2 pb-1.5 text-[11px] text-cyan-300 hover:underline inline-flex items-center gap-1 cursor-pointer"
+          className="mt-1.5 px-2.5 pb-2 text-[11px] text-cyan-200 hover:underline inline-flex items-center gap-1 cursor-pointer"
         >
           <Maximize2 className="w-3 h-3" />
           <span>Full screen</span>
@@ -124,13 +129,20 @@ export function EncryptedMediaRenderer({
     <a
       href={objectUrl}
       download={payload.fileName || 'encrypted-file'}
-      className="flex items-center gap-3 px-3 py-2.5 rounded-xl bg-black/25 hover:bg-black/35 border border-white/10 transition-colors max-w-xs"
+      onClick={() => audioManager.play('media.download')}
+      className={`flex items-center gap-3 px-3 py-2.5 rounded-xl border transition-colors max-w-xs ${
+        isMine
+          ? 'bg-black/20 hover:bg-black/30 border-white/20 text-white'
+          : 'bg-white/55 hover:bg-white/80 dark:bg-black/25 dark:hover:bg-black/35 border-white/65 dark:border-white/10 text-[var(--nx-text-primary)]'
+      }`}
     >
-      <FileText className="w-5 h-5 text-cyan-300 shrink-0" />
+      <FileText
+        className={`w-5 h-5 shrink-0 ${isMine ? 'text-cyan-200' : 'text-violet-600 dark:text-cyan-300'}`}
+      />
       <div className="min-w-0 flex-1">
         <div className="text-xs font-medium truncate">{payload.fileName || 'Document'}</div>
         {payload.originalSize && (
-          <div className="text-[11px] opacity-70 font-mono-tabular">
+          <div className="text-[11px] opacity-75 font-mono-tabular">
             {(payload.originalSize / 1024).toFixed(1)} KB
           </div>
         )}

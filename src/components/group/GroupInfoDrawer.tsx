@@ -10,10 +10,11 @@ import {
   UserPlus,
   X,
 } from 'lucide-react';
+import { audioManager } from '../../audio/AudioManager';
 import { apiRequest } from '../../lib/api';
 import { createGroupEpochEnvelopes, type StoredLocalKeyBundle } from '../../lib/crypto';
 import type { GroupDetails, MessageRecord, PublicUser } from '../../types/nexora';
-import { Avatar } from '../ui/Avatar';
+import { GlassButton, GlassInput, ProfileAvatar } from '../ui/LiquidGlass';
 
 interface GroupInfoDrawerProps {
   groupId: string;
@@ -109,6 +110,7 @@ export function GroupInfoDrawer({
         body: JSON.stringify({ userId: user.id, epochEnvelopes: envelopes }),
       });
 
+      audioManager.play('group.member_add');
       setSearchQ('');
       setSearchResults([]);
       await loadGroup();
@@ -136,8 +138,10 @@ export function GroupInfoDrawer({
       });
 
       if (targetUserId === currentUserId) {
+        audioManager.play('group.leave');
         onLeftOrDeleted();
       } else {
+        audioManager.play('group.member_remove');
         await loadGroup();
         onRefresh();
       }
@@ -156,6 +160,7 @@ export function GroupInfoDrawer({
         method: 'PATCH',
         body: JSON.stringify({ role: currentRole === 'admin' ? 'member' : 'admin' }),
       });
+      audioManager.play('group.settings_updated');
       await loadGroup();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Could not change role.');
@@ -173,6 +178,7 @@ export function GroupInfoDrawer({
         method: 'PATCH',
         body: JSON.stringify({ name: editName, description: editDesc }),
       });
+      audioManager.play('group.settings_updated');
       await loadGroup();
       onRefresh();
     } catch (err) {
@@ -186,6 +192,7 @@ export function GroupInfoDrawer({
     setBusy(true);
     try {
       await apiRequest(`/api/v1/groups/${groupId}`, { method: 'DELETE' });
+      audioManager.play('group.leave');
       onLeftOrDeleted();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to delete group.');
@@ -198,52 +205,60 @@ export function GroupInfoDrawer({
   );
 
   return (
-    <aside className="w-full sm:w-96 border-l border-white/10 bg-[#0b0f1f]/95 backdrop-blur-xl flex flex-col h-full shrink-0">
-      <div className="px-5 py-4 border-b border-white/10 flex items-center justify-between">
+    <aside className="w-full sm:w-96 nexora-glass-elevated border-y-0 border-r-0 flex flex-col h-full shrink-0">
+      <div className="relative z-10 px-5 py-4 border-b border-[var(--nx-hairline)] flex items-center justify-between">
         <div>
-          <h3 className="text-base font-display font-semibold text-white">Group Information</h3>
+          <h3 className="text-base font-display font-semibold text-[var(--nx-text-primary)]">Group Information</h3>
           {group && (
-            <div className="text-xs text-slate-400 font-mono-tabular">
+            <div className="text-xs text-[var(--nx-text-secondary)] font-mono-tabular">
               {group.memberCount}/{group.maxMembers} members · Epoch {group.currentEpoch}
             </div>
           )}
         </div>
         <button
           type="button"
-          onClick={onClose}
+          onClick={() => {
+            audioManager.play('ui.glass_close');
+            onClose();
+          }}
           aria-label="Close group info"
-          className="p-2 text-slate-400 hover:text-white cursor-pointer"
+          className="min-h-[40px] min-w-[40px] rounded-full hover:bg-[var(--nx-surface-hover)] text-[var(--nx-text-secondary)] hover:text-[var(--nx-text-primary)] flex items-center justify-center transition-colors cursor-pointer"
         >
           <X className="w-4 h-4" />
         </button>
       </div>
 
       {error && (
-        <div className="mx-4 mt-3 rounded-xl bg-rose-500/10 border border-rose-500/30 px-3 py-2 text-xs text-rose-200">
+        <div className="relative z-10 mx-4 mt-3 rounded-[16px] bg-rose-500/12 border border-rose-500/30 px-3 py-2 text-xs text-rose-700 dark:text-rose-200">
           {error}
         </div>
       )}
 
       {group && (
         <>
-          <div className="p-5 border-b border-white/10 flex items-center gap-4">
-            <Avatar src={group.avatarUrl} name={group.name} size="lg" isGroup />
+          <div className="relative z-10 p-5 border-b border-[var(--nx-hairline)] flex items-center gap-4">
+            <ProfileAvatar src={group.avatarUrl} name={group.name} size="lg" isGroup />
             <div className="min-w-0">
-              <div className="text-base font-display font-semibold text-white truncate">{group.name}</div>
-              <div className="text-xs text-slate-400 line-clamp-2 mt-0.5">
+              <div className="text-base font-display font-semibold text-[var(--nx-text-primary)] truncate">{group.name}</div>
+              <div className="text-xs text-[var(--nx-text-secondary)] line-clamp-2 mt-0.5">
                 {group.description || 'End-to-end encrypted group'}
               </div>
             </div>
           </div>
 
-          <div className="flex items-center gap-1 p-2 border-b border-white/10">
+          <div className="relative z-10 flex items-center gap-1 p-2 border-b border-[var(--nx-hairline)]">
             {(['members', 'media', 'settings'] as const).map((t) => (
               <button
                 key={t}
                 type="button"
-                onClick={() => setTab(t)}
-                className={`flex-1 py-2 text-xs font-medium rounded-lg capitalize transition-colors cursor-pointer ${
-                  tab === t ? 'bg-violet-600/25 text-violet-200' : 'text-slate-400 hover:text-white'
+                onClick={() => {
+                  audioManager.play('ui.tab_switch');
+                  setTab(t);
+                }}
+                className={`flex-1 py-2 text-xs font-medium rounded-[12px] capitalize transition-colors cursor-pointer ${
+                  tab === t
+                    ? 'bg-white/75 dark:bg-white/[0.15] text-slate-900 dark:text-white shadow-sm'
+                    : 'text-[var(--nx-text-secondary)] hover:text-[var(--nx-text-primary)]'
                 }`}
               >
                 {t}
@@ -251,39 +266,37 @@ export function GroupInfoDrawer({
             ))}
           </div>
 
-          <div className="flex-1 overflow-y-auto p-4 space-y-4">
+          <div className="relative z-10 flex-1 overflow-y-auto p-4 space-y-4">
             {tab === 'members' && (
               <>
                 {isAdminOrOwner && group.memberCount < group.maxMembers && (
                   <div className="space-y-2">
-                    <div className="relative">
-                      <Search className="w-3.5 h-3.5 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
-                      <input
-                        type="text"
-                        value={searchQ}
-                        onChange={(e) => handleSearchUsers(e.target.value)}
-                        placeholder="Add member by @username"
-                        className="w-full h-9 pl-8 pr-3 rounded-xl bg-slate-900/90 border border-white/10 text-xs text-white placeholder:text-slate-500 focus:outline-none focus:border-violet-500"
-                      />
-                    </div>
+                    <GlassInput
+                      type="text"
+                      value={searchQ}
+                      onChange={(e) => handleSearchUsers(e.target.value)}
+                      placeholder="Add member by @username"
+                      leadingIcon={<Search className="w-3.5 h-3.5" />}
+                      className="h-9 text-xs"
+                    />
                     {searchResults.length > 0 && (
-                      <div className="space-y-1 bg-slate-900/90 rounded-xl p-1.5 border border-white/10">
+                      <div className="space-y-1 nexora-glass-subtle rounded-[16px] p-1.5">
                         {searchResults.map((u) => (
                           <button
                             key={u.id}
                             type="button"
                             disabled={busy}
                             onClick={() => handleAddMember(u)}
-                            className="w-full flex items-center justify-between p-2 rounded-lg hover:bg-white/5 text-left cursor-pointer"
+                            className="w-full flex items-center justify-between p-2 rounded-[12px] hover:bg-[var(--nx-surface-hover)] text-left cursor-pointer"
                           >
                             <div className="flex items-center gap-2.5 min-w-0">
-                              <Avatar src={u.avatarUrl} name={u.displayName} size="xs" />
+                              <ProfileAvatar src={u.avatarUrl} name={u.displayName} size="xs" />
                               <div className="min-w-0">
-                                <div className="text-xs font-medium text-white truncate">{u.displayName}</div>
-                                <div className="text-[11px] text-slate-400 truncate">@{u.username}</div>
+                                <div className="text-xs font-medium text-[var(--nx-text-primary)] truncate">{u.displayName}</div>
+                                <div className="text-[11px] text-[var(--nx-text-secondary)] truncate">@{u.username}</div>
                               </div>
                             </div>
-                            <UserPlus className="w-4 h-4 text-cyan-400 shrink-0" />
+                            <UserPlus className="w-4 h-4 text-violet-600 dark:text-sky-300 shrink-0" />
                           </button>
                         ))}
                       </div>
@@ -295,17 +308,17 @@ export function GroupInfoDrawer({
                   {group.members.map((m) => (
                     <div
                       key={m.userId}
-                      className="flex items-center justify-between gap-2 p-2.5 rounded-xl bg-slate-900/50 border border-white/5"
+                      className="flex items-center justify-between gap-2 p-2.5 rounded-[16px] nexora-glass-subtle"
                     >
                       <div className="flex items-center gap-2.5 min-w-0">
-                        <Avatar src={m.avatarUrl} name={m.displayName} size="sm" isOnline={m.isOnline} />
+                        <ProfileAvatar src={m.avatarUrl} name={m.displayName} size="sm" isOnline={m.isOnline} />
                         <div className="min-w-0">
-                          <div className="text-sm font-medium text-white truncate flex items-center gap-1.5">
+                          <div className="text-sm font-medium text-[var(--nx-text-primary)] truncate flex items-center gap-1.5">
                             <span>{m.displayName}</span>
-                            {m.role === 'owner' && <Crown className="w-3.5 h-3.5 text-amber-400 shrink-0" />}
-                            {m.role === 'admin' && <Shield className="w-3.5 h-3.5 text-cyan-400 shrink-0" />}
+                            {m.role === 'owner' && <Crown className="w-3.5 h-3.5 text-amber-500 dark:text-amber-300 shrink-0" />}
+                            {m.role === 'admin' && <Shield className="w-3.5 h-3.5 text-sky-600 dark:text-sky-300 shrink-0" />}
                           </div>
-                          <div className="text-xs text-slate-400 truncate">
+                          <div className="text-xs text-[var(--nx-text-secondary)] truncate">
                             @{m.username} · {m.role} · Epoch {m.joinedEpoch}+
                           </div>
                         </div>
@@ -318,7 +331,7 @@ export function GroupInfoDrawer({
                             disabled={busy}
                             onClick={() => handleToggleRole(m.userId, m.role === 'admin' ? 'admin' : 'member')}
                             title={m.role === 'admin' ? 'Demote to member' : 'Promote to admin'}
-                            className="px-2 py-1 rounded-lg text-[11px] bg-white/5 hover:bg-white/10 text-slate-300 cursor-pointer"
+                            className="px-2 py-1 rounded-[10px] text-[11px] bg-white/60 dark:bg-white/[0.08] hover:bg-white/80 dark:hover:bg-white/[0.14] text-[var(--nx-text-primary)] cursor-pointer"
                           >
                             {m.role === 'admin' ? 'Demote' : 'Admin'}
                           </button>
@@ -333,7 +346,7 @@ export function GroupInfoDrawer({
                               onClick={() => handleRemoveOrLeave(m.userId)}
                               title="Remove member and rotate group key"
                               aria-label={`Remove ${m.username}`}
-                              className="p-1.5 rounded-lg text-rose-300 hover:bg-rose-500/15 cursor-pointer"
+                              className="p-1.5 rounded-[10px] text-rose-600 dark:text-rose-300 hover:bg-rose-500/15 cursor-pointer"
                             >
                               <UserMinus className="w-4 h-4" />
                             </button>
@@ -348,7 +361,7 @@ export function GroupInfoDrawer({
             {tab === 'media' && (
               <div className="space-y-2">
                 {mediaItems.length === 0 ? (
-                  <div className="text-center py-10 text-xs text-slate-500 space-y-2">
+                  <div className="text-center py-10 text-xs text-[var(--nx-text-secondary)] space-y-2">
                     <ImageIcon className="w-6 h-6 mx-auto opacity-50" />
                     <div>No encrypted media shared in this group yet.</div>
                   </div>
@@ -357,17 +370,17 @@ export function GroupInfoDrawer({
                     {mediaItems.map((m) => (
                       <div
                         key={m.id}
-                        className="flex items-center justify-between p-2.5 rounded-xl bg-slate-900/60 border border-white/5 text-xs"
+                        className="flex items-center justify-between p-2.5 rounded-[16px] nexora-glass-subtle text-xs"
                       >
                         <div className="min-w-0">
-                          <div className="text-slate-200 font-medium truncate">
+                          <div className="text-[var(--nx-text-primary)] font-medium truncate">
                             {m.localDecrypted?.fileName || `${m.kind} attachment`}
                           </div>
-                          <div className="text-slate-500">
+                          <div className="text-[var(--nx-text-secondary)]">
                             @{m.senderUsername} · {new Date(m.createdAt).toLocaleDateString()}
                           </div>
                         </div>
-                        <span className="text-[11px] text-cyan-300 capitalize">{m.kind}</span>
+                        <span className="text-[11px] text-violet-600 dark:text-sky-300 capitalize">{m.kind}</span>
                       </div>
                     ))}
                   </div>
@@ -380,54 +393,62 @@ export function GroupInfoDrawer({
                 {isAdminOrOwner && (
                   <form onSubmit={handleSaveDetails} className="space-y-3">
                     <div className="space-y-1">
-                      <label className="text-xs text-slate-400">Group Name</label>
-                      <input
+                      <label className="text-xs text-[var(--nx-text-secondary)]">Group Name</label>
+                      <GlassInput
                         type="text"
                         value={editName}
                         onChange={(e) => setEditName(e.target.value)}
-                        className="w-full h-9 px-3 rounded-xl bg-slate-900 border border-white/10 text-sm text-white"
                       />
                     </div>
                     <div className="space-y-1">
-                      <label className="text-xs text-slate-400">Description</label>
+                      <label className="text-xs text-[var(--nx-text-secondary)]">Description</label>
                       <textarea
                         rows={2}
                         value={editDesc}
                         onChange={(e) => setEditDesc(e.target.value)}
-                        className="w-full p-3 rounded-xl bg-slate-900 border border-white/10 text-xs text-white"
+                        className="w-full p-3 rounded-[16px] bg-white/55 dark:bg-white/[0.06] border border-white/75 dark:border-white/[0.11] text-xs text-[var(--nx-text-primary)] focus:outline-none focus:border-violet-400/60"
                       />
                     </div>
-                    <button
+                    <GlassButton
                       type="submit"
+                      variant="primary"
+                      size="sm"
+                      soundEvent={false}
                       disabled={busy}
-                      className="w-full h-9 rounded-xl bg-violet-600 hover:bg-violet-500 text-white text-xs font-medium cursor-pointer"
+                      className="w-full"
                     >
                       Save Group Details
-                    </button>
+                    </GlassButton>
                   </form>
                 )}
 
-                <div className="pt-3 border-t border-white/10 space-y-2">
-                  <button
+                <div className="pt-3 border-t border-[var(--nx-hairline)] space-y-2">
+                  <GlassButton
                     type="button"
+                    variant="secondary"
+                    size="md"
+                    soundEvent={false}
                     disabled={busy}
                     onClick={() => handleRemoveOrLeave(currentUserId)}
-                    className="w-full h-10 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-medium flex items-center justify-center gap-2 cursor-pointer"
+                    className="w-full"
                   >
                     <LogOut className="w-4 h-4" />
                     <span>Leave Group</span>
-                  </button>
+                  </GlassButton>
 
                   {myRole === 'owner' && (
-                    <button
+                    <GlassButton
                       type="button"
+                      variant="danger"
+                      size="md"
+                      soundEvent={false}
                       disabled={busy}
                       onClick={handleDeleteGroup}
-                      className="w-full h-10 rounded-xl bg-rose-500/15 hover:bg-rose-500/25 border border-rose-500/30 text-rose-200 text-xs font-medium flex items-center justify-center gap-2 cursor-pointer"
+                      className="w-full"
                     >
                       <Trash2 className="w-4 h-4" />
                       <span>Delete Group Permanently</span>
-                    </button>
+                    </GlassButton>
                   )}
                 </div>
               </div>

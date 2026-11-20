@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { AnimatePresence, motion } from 'motion/react';
 import { ChevronLeft, ChevronRight, Eye, Send, Trash2, X } from 'lucide-react';
+import { audioManager } from '../../audio/AudioManager';
 import { apiRequest, fetchEncryptedMediaBytes } from '../../lib/api';
 import {
   decryptMediaBlob,
@@ -8,9 +9,10 @@ import {
   encryptPrivateMessage,
   type StoredLocalKeyBundle,
 } from '../../lib/crypto';
+import { formatRelativeTimestamp } from '../../lib/time';
 import { useVisualPrefs } from '../../lib/theme';
 import type { PublicUser, StoryRecord } from '../../types/nexora';
-import { Avatar } from '../ui/Avatar';
+import { ProfileAvatar } from '../ui/LiquidGlass';
 import { CosmicLoader, ReactionParticleBurst } from '../ui/MagicalEffects';
 
 interface StoryViewerProps {
@@ -87,6 +89,7 @@ export function StoryViewer({
         objUrl = URL.createObjectURL(blob);
         setMediaUrl(objUrl);
         setCaption(meta.text || '');
+        audioManager.play('story.loaded');
 
         if (story.userId !== currentUserId) {
           apiRequest(`/api/v1/stories/${story.id}/view`, { method: 'POST' }).catch(() => {});
@@ -112,6 +115,7 @@ export function StoryViewer({
 
   const handleReact = async (emoji: string) => {
     setReactBurst({ emoji, ts: Date.now() });
+    audioManager.play('story.reaction');
     await apiRequest(`/api/v1/stories/${story.id}/react`, {
       method: 'POST',
       body: JSON.stringify({ emoji }),
@@ -153,6 +157,7 @@ export function StoryViewer({
           recipientEnvelopes: enc.recipientEnvelopes,
         }),
       });
+      audioManager.play('story.reply');
       setReplyText('');
       setFeedback('Encrypted reply sent');
       setTimeout(() => {
@@ -165,6 +170,7 @@ export function StoryViewer({
   };
 
   const handleDelete = async () => {
+    audioManager.play('story.delete');
     await apiRequest(`/api/v1/stories/${story.id}`, { method: 'DELETE' });
     onRefresh();
     onClose();
@@ -182,11 +188,12 @@ export function StoryViewer({
     if (!start || !t) return;
     const dx = t.clientX - start.x;
     const dy = t.clientY - start.y;
-    // Only navigate when swipe is clearly horizontal so vertical drawers never conflict
     if (Math.abs(dx) > 48 && Math.abs(dy) < 40) {
       if (dx < 0 && index < stories.length - 1) {
+        audioManager.play('story.next');
         setIndex((i) => Math.min(stories.length - 1, i + 1));
       } else if (dx > 0 && index > 0) {
+        audioManager.play('story.prev');
         setIndex((i) => Math.max(0, i - 1));
       }
     }
@@ -197,53 +204,40 @@ export function StoryViewer({
       initial={effectiveReducedMotion ? false : { opacity: 0 }}
       animate={{ opacity: 1 }}
       exit={effectiveReducedMotion ? undefined : { opacity: 0 }}
-      transition={{ duration: 0.22 }}
-      className="fixed inset-0 z-50 bg-black/95 backdrop-blur-xl flex items-center justify-center p-2 sm:p-6"
+      transition={{ duration: 0.2 }}
+      className="fixed inset-0 z-50 bg-black/92 backdrop-blur-2xl flex items-center justify-center p-0 sm:p-6"
     >
-      {/* Portal circular light aura on open */}
-      {!effectiveReducedMotion && (
-        <motion.div
-          initial={{ scale: 0.35, opacity: 0.55 }}
-          animate={{ scale: 1.5, opacity: 0 }}
-          transition={{ duration: 0.75, ease: [0.16, 1, 0.3, 1] }}
-          aria-hidden="true"
-          className="pointer-events-none fixed w-72 h-72 rounded-full bg-radial from-cyan-400/25 via-violet-500/20 to-transparent"
-        />
-      )}
-
       <motion.div
-        initial={effectiveReducedMotion ? false : { scale: 0.88, opacity: 0, filter: 'blur(6px)' }}
-        animate={{ scale: 1, opacity: 1, filter: 'blur(0px)' }}
-        exit={effectiveReducedMotion ? undefined : { scale: 0.9, opacity: 0, filter: 'blur(4px)' }}
+        initial={effectiveReducedMotion ? false : { scale: 0.94, opacity: 0 }}
+        animate={{ scale: 1, opacity: 1 }}
+        exit={effectiveReducedMotion ? undefined : { scale: 0.95, opacity: 0 }}
         transition={
           effectiveReducedMotion
             ? { duration: 0 }
-            : { type: 'spring', stiffness: 320, damping: 28 }
+            : { type: 'spring', stiffness: 340, damping: 30 }
         }
         onTouchStart={handleTouchStart}
         onTouchEnd={handleTouchEnd}
-        className="relative w-full max-w-md h-[88vh] bg-[#0b0f1f] border border-violet-400/25 rounded-3xl overflow-hidden flex flex-col shadow-[0_0_40px_rgba(124,58,237,0.28)]"
+        className="relative w-full max-w-md h-full sm:h-[88vh] bg-[#06070d] sm:border sm:border-white/[0.12] sm:rounded-[32px] overflow-hidden flex flex-col shadow-[0_24px_64px_rgba(0,0,0,0.65)]"
       >
-        {/* Segmented Progress Bars */}
-        <div className="absolute top-0 inset-x-0 z-20 p-3 space-y-3 bg-gradient-to-b from-black/80 to-transparent">
-          <div className="flex gap-1">
+        {/* Floating Translucent Top Controls */}
+        <div className="absolute top-0 inset-x-0 z-20 p-3.5 pt-safe space-y-3 bg-gradient-to-b from-black/75 via-black/35 to-transparent">
+          <div className="flex gap-1.5">
             {stories.map((s, idx) => {
               const filled = idx < index;
               const current = idx === index;
               return (
-                <div key={s.id} className="h-1 flex-1 rounded-full bg-white/25 overflow-hidden">
+                <div key={s.id} className="h-[3px] flex-1 rounded-full bg-white/25 overflow-hidden">
                   <motion.div
                     initial={false}
                     animate={{ width: filled || current ? '100%' : '0%' }}
                     transition={
                       effectiveReducedMotion
                         ? { duration: 0 }
-                        : { duration: current ? 0.45 : 0.2, ease: [0.16, 1, 0.3, 1] }
+                        : { duration: current ? 0.35 : 0.18, ease: [0.16, 1, 0.3, 1] }
                     }
                     className={`h-full rounded-full ${
-                      current
-                        ? 'bg-gradient-to-r from-violet-400 to-cyan-300 shadow-[0_0_8px_rgba(34,211,238,0.65)]'
-                        : 'bg-cyan-400'
+                      current ? 'bg-white' : 'bg-white/80'
                     }`}
                   />
                 </div>
@@ -251,23 +245,24 @@ export function StoryViewer({
             })}
           </div>
 
-          <div className="flex items-center justify-between">
+          <div className="bg-black/55 backdrop-blur-xl border border-white/20 shadow-[inset_0_1px_0_rgba(255,255,255,0.2)] rounded-full px-3 py-1.5 flex items-center justify-between gap-2">
             <div className="flex items-center gap-2.5 min-w-0">
-              <Avatar src={story.avatarUrl} name={story.displayName} size="sm" />
+              <ProfileAvatar src={story.avatarUrl} name={story.displayName} size="sm" />
               <div className="min-w-0">
                 <div className="text-xs font-semibold text-white truncate">{story.displayName}</div>
-                <div className="text-[11px] text-slate-300">
-                  @{story.username} · {new Date(story.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                <div className="text-[10px] text-slate-300 truncate">
+                  @{story.username} · {formatRelativeTimestamp(story.createdAt)}
                 </div>
               </div>
             </div>
-            <div className="flex items-center gap-1">
+
+            <div className="flex items-center gap-0.5 shrink-0">
               {isOwner && (
                 <button
                   type="button"
                   onClick={handleDelete}
                   aria-label="Delete story"
-                  className="p-2 text-rose-300 hover:text-rose-200 cursor-pointer"
+                  className="min-h-[36px] min-w-[36px] rounded-full hover:bg-white/10 text-rose-300 flex items-center justify-center cursor-pointer"
                 >
                   <Trash2 className="w-4 h-4" />
                 </button>
@@ -276,15 +271,15 @@ export function StoryViewer({
                 type="button"
                 onClick={onClose}
                 aria-label="Close story viewer"
-                className="p-2 text-slate-200 hover:text-white cursor-pointer"
+                className="min-h-[36px] min-w-[36px] rounded-full hover:bg-white/10 text-slate-100 flex items-center justify-center cursor-pointer"
               >
-                <X className="w-5 h-5" />
+                <X className="w-4 h-4" />
               </button>
             </div>
           </div>
         </div>
 
-        {/* Story Media Viewport (zero CSS camera filters on user photos/videos) */}
+        {/* Full-screen Story Media Viewport */}
         <div className="flex-1 relative flex items-center justify-center bg-black overflow-hidden">
           <AnimatePresence mode="wait">
             {loading ? (
@@ -303,10 +298,10 @@ export function StoryViewer({
             ) : mediaUrl ? (
               <motion.div
                 key={story.id}
-                initial={effectiveReducedMotion ? false : { opacity: 0, scale: 0.96 }}
+                initial={effectiveReducedMotion ? false : { opacity: 0, scale: 0.97 }}
                 animate={{ opacity: 1, scale: 1 }}
-                exit={effectiveReducedMotion ? undefined : { opacity: 0, scale: 1.03 }}
-                transition={{ duration: effectiveReducedMotion ? 0 : 0.25, ease: [0.16, 1, 0.3, 1] }}
+                exit={effectiveReducedMotion ? undefined : { opacity: 0, scale: 1.02 }}
+                transition={{ duration: effectiveReducedMotion ? 0 : 0.22, ease: [0.16, 1, 0.3, 1] }}
                 className="w-full h-full flex items-center justify-center"
               >
                 {story.mediaType === 'video' ? (
@@ -330,9 +325,12 @@ export function StoryViewer({
           {index > 0 && (
             <button
               type="button"
-              onClick={() => setIndex((i) => Math.max(0, i - 1))}
+              onClick={() => {
+                audioManager.play('story.prev');
+                setIndex((i) => Math.max(0, i - 1));
+              }}
               aria-label="Previous story"
-              className="absolute left-2 top-1/2 -translate-y-1/2 w-9 h-9 rounded-full bg-black/55 border border-white/10 text-white flex items-center justify-center hover:bg-black/80 cursor-pointer transition-colors"
+              className="absolute left-2.5 top-1/2 -translate-y-1/2 w-10 h-10 rounded-full bg-black/55 backdrop-blur-xl border border-white/20 text-white flex items-center justify-center hover:bg-black/70 cursor-pointer transition-colors"
             >
               <ChevronLeft className="w-5 h-5" />
             </button>
@@ -340,40 +338,48 @@ export function StoryViewer({
           {index < stories.length - 1 && (
             <button
               type="button"
-              onClick={() => setIndex((i) => Math.min(stories.length - 1, i + 1))}
+              onClick={() => {
+                audioManager.play('story.next');
+                setIndex((i) => Math.min(stories.length - 1, i + 1));
+              }}
               aria-label="Next story"
-              className="absolute right-2 top-1/2 -translate-y-1/2 w-9 h-9 rounded-full bg-black/55 border border-white/10 text-white flex items-center justify-center hover:bg-black/80 cursor-pointer transition-colors"
+              className="absolute right-2.5 top-1/2 -translate-y-1/2 w-10 h-10 rounded-full bg-black/55 backdrop-blur-xl border border-white/20 text-white flex items-center justify-center hover:bg-black/70 cursor-pointer transition-colors"
             >
               <ChevronRight className="w-5 h-5" />
             </button>
           )}
         </div>
 
-        {/* Caption & Interactive Footer */}
-        <div className="p-4 bg-gradient-to-t from-black/95 via-black/80 to-black/40 space-y-3">
+        {/* Floating Liquid Glass Story Footer */}
+        <div className="p-4 pb-safe bg-gradient-to-t from-black/95 via-black/75 to-transparent space-y-3">
           {caption && <p className="text-sm text-white text-center">{caption}</p>}
 
           {feedback && (
-            <div className="text-center text-xs text-cyan-300 font-medium">{feedback}</div>
+            <div className="text-center text-xs text-sky-300 font-medium">{feedback}</div>
           )}
 
           {isOwner ? (
             <div className="space-y-2">
               <button
                 type="button"
-                onClick={() => setShowViewers((v) => !v)}
-                className="w-full h-10 rounded-xl bg-white/10 hover:bg-white/15 text-xs text-white font-medium flex items-center justify-center gap-2 cursor-pointer"
+                onClick={() => {
+                  audioManager.play('ui.menu_open');
+                  setShowViewers((v) => !v);
+                }}
+                className="w-full h-11 rounded-full bg-white/12 backdrop-blur-xl border border-white/20 hover:bg-white/20 text-xs text-white font-medium flex items-center justify-center gap-2 cursor-pointer transition-colors"
               >
-                <Eye className="w-4 h-4 text-cyan-300" />
-                <span>{story.viewCount} {story.viewCount === 1 ? 'Viewer' : 'Viewers'}</span>
+                <Eye className="w-4 h-4 text-sky-300" />
+                <span>
+                  {story.viewCount} {story.viewCount === 1 ? 'Viewer' : 'Viewers'}
+                </span>
               </button>
               {showViewers && (
-                <div className="max-h-36 overflow-y-auto space-y-1.5 pt-1">
-                  {(!story.viewers || story.viewers.length === 0) ? (
+                <div className="bg-black/70 backdrop-blur-xl border border-white/15 rounded-2xl p-3 max-h-36 overflow-y-auto space-y-1.5">
+                  {!story.viewers || story.viewers.length === 0 ? (
                     <div className="text-xs text-slate-400 text-center py-2">No views yet.</div>
                   ) : (
                     story.viewers.map((v) => (
-                      <div key={v.userId} className="flex items-center justify-between text-xs text-slate-200 px-2">
+                      <div key={v.userId} className="flex items-center justify-between text-xs text-slate-200 px-1">
                         <span>@{v.username}</span>
                         <span className="text-slate-400 font-mono-tabular">
                           {new Date(v.viewedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
@@ -394,7 +400,7 @@ export function StoryViewer({
                     whileHover={effectiveReducedMotion ? undefined : { scale: 1.12 }}
                     whileTap={effectiveReducedMotion ? undefined : { scale: 0.9 }}
                     onClick={() => handleReact(em)}
-                    className="relative w-9 h-9 rounded-full bg-white/10 hover:bg-white/20 text-base flex items-center justify-center transition-colors cursor-pointer"
+                    className="relative w-10 h-10 rounded-full bg-white/12 backdrop-blur-xl border border-white/20 hover:bg-white/20 text-base flex items-center justify-center transition-colors cursor-pointer"
                   >
                     {em}
                     <ReactionParticleBurst
@@ -403,21 +409,23 @@ export function StoryViewer({
                   </motion.button>
                 ))}
               </div>
-              <form onSubmit={handlePrivateReply} className="flex items-center gap-2">
-                <input
-                  type="text"
-                  value={replyText}
-                  onChange={(e) => setReplyText(e.target.value)}
-                  placeholder={`Reply privately to @${story.username}...`}
-                  className="flex-1 h-10 px-3.5 rounded-xl bg-white/10 border border-white/15 text-xs text-white placeholder:text-slate-400 focus:outline-none focus:border-violet-400"
-                />
-                <button
-                  type="submit"
-                  aria-label="Send story reply"
-                  className="w-10 h-10 rounded-xl bg-violet-600 hover:bg-violet-500 text-white flex items-center justify-center cursor-pointer"
-                >
-                  <Send className="w-4 h-4" />
-                </button>
+              <form onSubmit={handlePrivateReply}>
+                <div className="rounded-[28px] px-2.5 py-1.5 flex items-center gap-1.5 bg-white/12 backdrop-blur-xl border border-white/22 shadow-[inset_0_1px_0_rgba(255,255,255,0.2)]">
+                  <input
+                    type="text"
+                    value={replyText}
+                    onChange={(e) => setReplyText(e.target.value)}
+                    placeholder={`Reply privately to @${story.username}...`}
+                    className="flex-1 h-9 px-3 bg-transparent text-xs text-white placeholder:text-slate-300 focus:outline-none"
+                  />
+                  <button
+                    type="submit"
+                    aria-label="Send story reply"
+                    className="w-9 h-9 rounded-full bg-gradient-to-br from-[#7c5cf6] to-[#566ee6] text-white flex items-center justify-center cursor-pointer"
+                  >
+                    <Send className="w-3.5 h-3.5" />
+                  </button>
+                </div>
               </form>
             </div>
           )}

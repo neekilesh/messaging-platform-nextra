@@ -230,10 +230,19 @@ export interface ConversationSummary {
   myEpochEnvelopes?: GroupEpochEnvelope[];
 }
 
+export interface FriendStreakCountdown {
+  isActive: boolean;
+  isExpiring: boolean;
+  remainingMs: number | null;
+  formattedCountdown: string | null;
+}
+
 export interface FriendItem {
   friendshipId: string;
   user: PublicUser;
   streak: StreakInfo;
+  streakExpiringCountdown?: string | null;
+  streakRemainingMs?: number | null;
   conversationId: string | null;
   createdAt: string;
 }

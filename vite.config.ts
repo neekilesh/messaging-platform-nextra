@@ -109,6 +109,37 @@ export default defineConfig(() => {
           }
         },
       },
+      (() => {
+        let skipHmrWs = false;
+        return {
+          name: 'disable-vite-client-ws-when-hmr-off',
+          apply: 'serve' as const,
+          enforce: 'post' as const,
+          configResolved(resolvedConfig: { server: { hmr?: unknown; ws?: unknown } }) {
+            skipHmrWs = resolvedConfig.server.hmr === false || resolvedConfig.server.ws === false;
+          },
+          transform(code: string, id: string) {
+            if (!skipHmrWs) return;
+            const normId = id.replace(/\\/g, '/');
+            if (normId.endsWith('/vite/dist/client/client.mjs') || normId.includes('@vite/client')) {
+              if (code.includes('transport.connect(createHMRHandler(handleMessage));')) {
+                return {
+                  code: code
+                    .replace(
+                      'transport.connect(createHMRHandler(handleMessage));',
+                      '/* HMR disabled: skipped Vite WebSocket connect */'
+                    )
+                    .replace(
+                      'this.transport.send(payload).catch((err) => {',
+                      'Promise.resolve().catch((err) => {'
+                    ),
+                  map: null,
+                };
+              }
+            }
+          },
+        };
+      })(),
     ],
 
     resolve: {

@@ -1,6 +1,7 @@
 import React, { useEffect } from 'react';
 import { motion } from 'motion/react';
 import { Download, Lock, X } from 'lucide-react';
+import { audioManager } from '../../audio/AudioManager';
 import { useVisualPrefs } from '../../lib/theme';
 
 interface MediaLightboxProps {
@@ -44,6 +45,7 @@ export function MediaLightbox({ url, mimeType, fileName, onClose }: MediaLightbo
           <a
             href={url}
             download={fileName || 'nexora-media'}
+            onClick={() => audioManager.play('media.download')}
             className="h-9 px-3 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-100 text-xs font-medium inline-flex items-center gap-1.5 transition-colors"
           >
             <Download className="w-3.5 h-3.5" />
