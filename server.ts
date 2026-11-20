@@ -4,9 +4,9 @@ import http from 'node:http';
 import path from 'node:path';
 import express from 'express';
 import { db } from './src/db/index.ts';
-import { ensureDatabaseSchema } from './src/db/ensure-schema.ts';
 import { createApiApp, runRetentionCleanup } from './server/app.ts';
 import { setupSocketServer } from './server/socket.ts';
+import { setupLiveVoiceWebSocket } from './server/live-ws.ts';
 
 function resolvePort(): number {
   const argIdx = process.argv.indexOf('--port');
@@ -25,11 +25,10 @@ function resolvePort(): number {
 }
 
 async function startServer() {
-  ensureDatabaseSchema(db).catch(() => {});
-
   const app = createApiApp(db);
   const httpServer = http.createServer(app);
   setupSocketServer(httpServer, db);
+  setupLiveVoiceWebSocket(httpServer, db);
 
   const cleanupTimer = setInterval(() => {
     runRetentionCleanup(db).catch((err) => {

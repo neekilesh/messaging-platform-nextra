@@ -21,6 +21,7 @@ import { createRequireAuth, getIO, getPublicUserById, isBlockedBetween } from '.
 import type { AuthedRequest } from '../context.ts';
 import { getStreakInfo, recordStreakActivity } from '../streaks.ts';
 import type {
+  EncryptedMessageReaction,
   MessageReactionItem,
   MessageRecord,
   MessageStatus,
@@ -63,8 +64,77 @@ function orderPair(a: string, b: string): [string, string] {
 }
 
 const ALLOWED_DISAPPEARING = new Set([0, 10, 60, 3600, 86400, 604800, 2592000]);
+const E2EE_REACTION_SENTINEL = '__e2ee__';
 
 type MessageDbRow = typeof messages.$inferSelect;
+
+async function loadMessageReactions(
+  database: PgDatabase,
+  messageId: string,
+  filterForUserId?: string
+): Promise<{
+  reactions: MessageReactionItem[];
+  encryptedReactions: EncryptedMessageReaction[];
+}> {
+  const reactionRows = await database
+    .select({
+      emoji: messageReactions.emoji,
+      userId: messageReactions.userId,
+      ciphertext: messageReactions.ciphertext,
+      iv: messageReactions.iv,
+      aad: messageReactions.aad,
+      recipientEnvelopesJson: messageReactions.recipientEnvelopesJson,
+      epoch: messageReactions.epoch,
+      createdAt: messageReactions.createdAt,
+    })
+    .from(messageReactions)
+    .where(eq(messageReactions.messageId, messageId));
+
+  const reactionMap = new Map<string, string[]>();
+  const encryptedReactions: EncryptedMessageReaction[] = [];
+
+  for (const r of reactionRows) {
+    if (r.emoji === E2EE_REACTION_SENTINEL || (r.ciphertext && r.iv && r.aad)) {
+      if (!r.ciphertext || !r.iv || !r.aad) continue;
+      let envelopes: Record<string, RecipientEnvelope> | null = null;
+      if (r.recipientEnvelopesJson) {
+        try {
+          const full = JSON.parse(r.recipientEnvelopesJson) as Record<string, RecipientEnvelope>;
+          if (filterForUserId && full[filterForUserId]) {
+            envelopes = { [filterForUserId]: full[filterForUserId] };
+          } else {
+            envelopes = full;
+          }
+        } catch {
+          envelopes = null;
+        }
+      }
+      encryptedReactions.push({
+        userId: r.userId,
+        ciphertext: r.ciphertext,
+        iv: r.iv,
+        aad: r.aad,
+        recipientEnvelopes: envelopes,
+        epoch: typeof r.epoch === 'number' ? r.epoch : null,
+        createdAt: r.createdAt,
+      });
+    } else {
+      const list = reactionMap.get(r.emoji) || [];
+      list.push(r.userId);
+      reactionMap.set(r.emoji, list);
+    }
+  }
+
+  const reactions: MessageReactionItem[] = Array.from(reactionMap.entries()).map(
+    ([emoji, userIds]) => ({
+      emoji,
+      userIds,
+      count: userIds.length,
+    })
+  );
+
+  return { reactions, encryptedReactions };
+}
 
 export async function hydrateMessageRow(
   database: PgDatabase,
@@ -136,27 +206,9 @@ export async function hydrateMessageRow(
       };
     });
 
-  const reactionRows = await database
-    .select({
-      emoji: messageReactions.emoji,
-      userId: messageReactions.userId,
-    })
-    .from(messageReactions)
-    .where(eq(messageReactions.messageId, row.id));
-
-  const reactionMap = new Map<string, string[]>();
-  for (const r of reactionRows) {
-    const list = reactionMap.get(r.emoji) || [];
-    list.push(r.userId);
-    reactionMap.set(r.emoji, list);
-  }
-  const reactions: MessageReactionItem[] = Array.from(reactionMap.entries()).map(
-    ([emoji, userIds]) => ({
-      emoji,
-      userIds,
-      count: userIds.length,
-    })
-  );
+  const { reactions, encryptedReactions } = row.deletedForEveryone
+    ? { reactions: [] as MessageReactionItem[], encryptedReactions: [] as EncryptedMessageReaction[] }
+    : await loadMessageReactions(database, row.id, requesterId);
 
   let parsedEnvelopes: Record<
     string,
@@ -202,6 +254,7 @@ export async function hydrateMessageRow(
     updatedAt: row.updatedAt,
     status,
     reactions,
+    ...(encryptedReactions.length > 0 ? { encryptedReactions } : {}),
     ...(readReceipts.length > 0 ? { readReceipts } : {}),
   };
 }
@@ -1071,19 +1124,23 @@ export function createConversationsRouter(database: PgDatabase) {
   router.post('/messages/:messageId/reactions', requireAuth, async (req: AuthedRequest, res) => {
     try {
       const msgId = String(req.params.messageId);
-      const emoji = typeof req.body?.emoji === 'string' ? req.body.emoji.trim().slice(0, 16) : '';
-      if (!emoji) {
-        return res.status(400).json({ error: 'Emoji is required.' });
-      }
+      const body = req.body || {};
 
       const msgRows = await database
-        .select({ id: messages.id, conversationId: messages.conversationId })
+        .select({
+          id: messages.id,
+          conversationId: messages.conversationId,
+          deletedForEveryone: messages.deletedForEveryone,
+        })
         .from(messages)
         .where(eq(messages.id, msgId))
         .limit(1);
       const msg = msgRows[0];
       if (!msg) {
         return res.status(404).json({ error: 'Message not found.' });
+      }
+      if (msg.deletedForEveryone === 1) {
+        return res.status(400).json({ error: 'Cannot react to a deleted message.' });
       }
 
       const member = await database
@@ -1100,59 +1157,112 @@ export function createConversationsRouter(database: PgDatabase) {
         return res.status(403).json({ error: 'Access denied.' });
       }
 
-      const existingRows = await database
-        .select({ id: messageReactions.id })
-        .from(messageReactions)
-        .where(
-          and(
-            eq(messageReactions.messageId, msg.id),
-            eq(messageReactions.userId, req.userId!),
-            eq(messageReactions.emoji, emoji)
-          )
-        )
-        .limit(1);
+      const nowIso = new Date().toISOString();
+      const isEncryptedPayload =
+        typeof body.ciphertext === 'string' &&
+        body.ciphertext.length > 0 &&
+        typeof body.iv === 'string' &&
+        body.iv.length > 0;
 
-      if (existingRows[0]) {
+      if (isEncryptedPayload) {
+        const expectedAad = `nexora-reaction:${msg.conversationId}:${msg.id}:${req.userId!}`;
+        const aad = typeof body.aad === 'string' ? body.aad : '';
+        if (aad !== expectedAad) {
+          return res.status(400).json({ error: 'Invalid encrypted reaction AAD.' });
+        }
+
+        const epoch = typeof body.epoch === 'number' ? body.epoch : null;
+        const recipientEnvelopesJson =
+          body.recipientEnvelopes && typeof body.recipientEnvelopes === 'object'
+            ? JSON.stringify(body.recipientEnvelopes)
+            : null;
+
+        if (epoch === null && !recipientEnvelopesJson) {
+          return res.status(400).json({ error: 'Encrypted reaction key envelope or epoch is required.' });
+        }
+
+        await database
+          .insert(messageReactions)
+          .values({
+            id: crypto.randomUUID(),
+            messageId: msg.id,
+            userId: req.userId!,
+            emoji: E2EE_REACTION_SENTINEL,
+            ciphertext: body.ciphertext,
+            iv: body.iv,
+            aad,
+            recipientEnvelopesJson,
+            epoch,
+            createdAt: nowIso,
+          })
+          .onConflictDoUpdate({
+            target: [messageReactions.messageId, messageReactions.userId, messageReactions.emoji],
+            set: {
+              ciphertext: body.ciphertext,
+              iv: body.iv,
+              aad,
+              recipientEnvelopesJson,
+              epoch,
+              createdAt: nowIso,
+            },
+          });
+      } else if (body.remove === true) {
         await database
           .delete(messageReactions)
-          .where(eq(messageReactions.id, existingRows[0].id));
+          .where(
+            and(
+              eq(messageReactions.messageId, msg.id),
+              eq(messageReactions.userId, req.userId!),
+              eq(messageReactions.emoji, E2EE_REACTION_SENTINEL)
+            )
+          );
       } else {
-        await database.insert(messageReactions).values({
-          id: crypto.randomUUID(),
-          messageId: msg.id,
-          userId: req.userId!,
-          emoji,
-          createdAt: new Date().toISOString(),
-        });
+        const emoji = typeof body.emoji === 'string' ? body.emoji.trim().slice(0, 16) : '';
+        if (!emoji || emoji === E2EE_REACTION_SENTINEL) {
+          return res.status(400).json({ error: 'Encrypted reaction payload or removal flag is required.' });
+        }
+
+        const existingRows = await database
+          .select({ id: messageReactions.id })
+          .from(messageReactions)
+          .where(
+            and(
+              eq(messageReactions.messageId, msg.id),
+              eq(messageReactions.userId, req.userId!),
+              eq(messageReactions.emoji, emoji)
+            )
+          )
+          .limit(1);
+
+        if (existingRows[0]) {
+          await database
+            .delete(messageReactions)
+            .where(eq(messageReactions.id, existingRows[0].id));
+        } else {
+          await database.insert(messageReactions).values({
+            id: crypto.randomUUID(),
+            messageId: msg.id,
+            userId: req.userId!,
+            emoji,
+            createdAt: nowIso,
+          });
+        }
       }
 
-      const reactionRows = await database
-        .select({
-          emoji: messageReactions.emoji,
-          userId: messageReactions.userId,
-        })
-        .from(messageReactions)
-        .where(eq(messageReactions.messageId, msg.id));
-
-      const map = new Map<string, string[]>();
-      for (const r of reactionRows) {
-        const list = map.get(r.emoji) || [];
-        list.push(r.userId);
-        map.set(r.emoji, list);
-      }
-      const reactions = Array.from(map.entries()).map(([em, userIds]) => ({
-        emoji: em,
-        userIds,
-        count: userIds.length,
-      }));
+      const broadcastState = await loadMessageReactions(database, msg.id);
+      const requesterState = await loadMessageReactions(database, msg.id, req.userId!);
 
       getIO()?.to(`conv:${msg.conversationId}`).emit('message:reactions', {
         conversationId: msg.conversationId,
         messageId: msg.id,
-        reactions,
+        reactions: broadcastState.reactions,
+        encryptedReactions: broadcastState.encryptedReactions,
       });
 
-      return res.json({ reactions });
+      return res.json({
+        reactions: requesterState.reactions,
+        encryptedReactions: requesterState.encryptedReactions,
+      });
     } catch (error) {
       console.error('reaction toggle error:', error);
       return res.status(500).json({ error: 'Failed to toggle reaction.' });

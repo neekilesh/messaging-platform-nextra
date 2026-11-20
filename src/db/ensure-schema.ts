@@ -25,7 +25,6 @@ export function ensureDatabaseSchema(database: PgDatabase): Promise<boolean> {
             created_at text NOT NULL,
             updated_at text NOT NULL
           );
-          ALTER TABLE users ADD COLUMN IF NOT EXISTS uid text UNIQUE;
           CREATE INDEX IF NOT EXISTS idx_users_username_norm ON users (username_normalized);
 
           CREATE TABLE IF NOT EXISTS email_verifications (
@@ -267,6 +266,11 @@ export function ensureDatabaseSchema(database: PgDatabase): Promise<boolean> {
             message_id text NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
             user_id text NOT NULL REFERENCES users(id) ON DELETE CASCADE,
             emoji text NOT NULL,
+            ciphertext text,
+            iv text,
+            aad text,
+            recipient_envelopes_json text,
+            epoch integer,
             created_at text NOT NULL
           );
           CREATE UNIQUE INDEX IF NOT EXISTS idx_message_reactions_unique ON message_reactions (message_id, user_id, emoji);
@@ -314,6 +318,53 @@ export function ensureDatabaseSchema(database: PgDatabase): Promise<boolean> {
             created_at text NOT NULL
           );
           CREATE INDEX IF NOT EXISTS idx_notifications_user ON notifications (user_id, created_at);
+
+          CREATE TABLE IF NOT EXISTS ai_threads (
+            id text PRIMARY KEY,
+            user_id text NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            title text NOT NULL,
+            model text NOT NULL,
+            persona text NOT NULL DEFAULT 'General Assistant',
+            system_instruction text NOT NULL DEFAULT '',
+            created_at text NOT NULL,
+            updated_at text NOT NULL
+          );
+          CREATE INDEX IF NOT EXISTS idx_ai_threads_user ON ai_threads (user_id, updated_at);
+
+          CREATE TABLE IF NOT EXISTS ai_messages (
+            id text PRIMARY KEY,
+            thread_id text NOT NULL REFERENCES ai_threads(id) ON DELETE CASCADE,
+            user_id text NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            role text NOT NULL,
+            content text NOT NULL,
+            model text NOT NULL,
+            grounding_json text,
+            created_at text NOT NULL
+          );
+          CREATE INDEX IF NOT EXISTS idx_ai_messages_thread ON ai_messages (thread_id, created_at);
+
+          CREATE TABLE IF NOT EXISTS ai_artifacts (
+            id text PRIMARY KEY,
+            user_id text NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            kind text NOT NULL,
+            model text NOT NULL,
+            prompt text NOT NULL,
+            mime_type text NOT NULL,
+            data_url text NOT NULL,
+            metadata_json text,
+            created_at text NOT NULL
+          );
+          CREATE INDEX IF NOT EXISTS idx_ai_artifacts_user ON ai_artifacts (user_id, created_at);
+
+          CREATE TABLE IF NOT EXISTS game_scores (
+            id text PRIMARY KEY,
+            user_id text NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            mode text NOT NULL DEFAULT 'arcade',
+            score integer NOT NULL,
+            wave integer NOT NULL DEFAULT 1,
+            created_at text NOT NULL
+          );
+          CREATE INDEX IF NOT EXISTS idx_game_scores_score ON game_scores (score);
         `);
         return true;
       } catch (err) {

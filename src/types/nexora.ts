@@ -109,6 +109,16 @@ export interface MessageReactionItem {
   count: number;
 }
 
+export interface EncryptedMessageReaction {
+  userId: string;
+  ciphertext: string;
+  iv: string;
+  aad: string;
+  recipientEnvelopes: Record<string, RecipientEnvelope> | null;
+  epoch: number | null;
+  createdAt: string;
+}
+
 export interface SignedEncryptedReadReceipt {
   messageId: string;
   readerId: string;
@@ -145,6 +155,7 @@ export interface MessageRecord {
   updatedAt: string;
   status: MessageStatus;
   reactions: MessageReactionItem[];
+  encryptedReactions?: EncryptedMessageReaction[];
   readReceipts?: SignedEncryptedReadReceipt[];
   verifiedRead?: boolean;
   verifiedReadAt?: string | null;

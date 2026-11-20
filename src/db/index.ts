@@ -6,15 +6,20 @@ declare global {
   var _postgresPool: Pool | undefined;
 }
 
-function shouldUseSsl(): boolean {
-  const rawSsl = process.env.SQL_SSL?.trim().toLowerCase();
+function cleanEnv(val: string | undefined): string | undefined {
+  if (!val) return undefined;
+  const trimmed = val.trim().replace(/^["']|["']$/g, '').trim();
+  return trimmed || undefined;
+}
+
+function shouldUseSsl(host: string | undefined): boolean {
+  const rawSsl = cleanEnv(process.env.SQL_SSL)?.toLowerCase();
   if (rawSsl === 'true' || rawSsl === '1') return true;
   if (rawSsl === 'false' || rawSsl === '0') return false;
 
-  const host = process.env.SQL_HOST?.trim();
   if (!host) return false;
-  // Unix sockets (/app/cloudsql/...) and localhost do not use TLS, whereas remote Postgres hosts (Supabase/Render) require SSL
-  if (host.startsWith('/') || host === 'localhost' || host === '127.0.0.1') {
+  // Unix sockets, localhost, and single-label internal hostnames (e.g. Render internal dpg-*-a) do not use SSL
+  if (host.startsWith('/') || host === 'localhost' || host === '127.0.0.1' || !host.includes('.')) {
     return false;
   }
   return true;
@@ -22,13 +27,19 @@ function shouldUseSsl(): boolean {
 
 export const createPool = () => {
   if (!global._postgresPool) {
+    const host = cleanEnv(process.env.SQL_HOST);
+    const portRaw = cleanEnv(process.env.SQL_PORT);
+    const user = cleanEnv(process.env.SQL_USER);
+    const password = cleanEnv(process.env.SQL_PASSWORD);
+    const database = cleanEnv(process.env.SQL_DB_NAME);
+
     global._postgresPool = new Pool({
-      host: process.env.SQL_HOST,
-      port: process.env.SQL_PORT ? Number(process.env.SQL_PORT) : 5432,
-      user: process.env.SQL_USER,
-      password: process.env.SQL_PASSWORD,
-      database: process.env.SQL_DB_NAME,
-      ...(shouldUseSsl() ? { ssl: { rejectUnauthorized: false } } : {}),
+      host,
+      port: portRaw ? Number(portRaw) : 5432,
+      user,
+      password,
+      database,
+      ...(shouldUseSsl(host) ? { ssl: { rejectUnauthorized: false } } : {}),
       max: 10,
       connectionTimeoutMillis: 15000,
     });

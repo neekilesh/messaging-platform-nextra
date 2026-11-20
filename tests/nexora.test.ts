@@ -4,7 +4,7 @@ import http from 'node:http';
 import crypto from 'node:crypto';
 import { eq, inArray } from 'drizzle-orm';
 import { createPool, db } from '../src/db/index.ts';
-import { messages, stories, users } from '../src/db/schema.ts';
+import { messageReactions, messages, stories, users } from '../src/db/schema.ts';
 import { createApiApp, runRetentionCleanup } from '../server/app.ts';
 import { setupSocketServer } from '../server/socket.ts';
 import { recordStreakActivity } from '../server/streaks.ts';
@@ -389,6 +389,170 @@ describe('NEXORA Full-Stack Integration & Security Suite', () => {
     // Eve (unauthorized) cannot read conversation
     const eveAccess = await api(`/api/v1/conversations/${convId}/messages`, {}, eve.token);
     assert.equal(eveAccess.status, 403);
+  });
+
+  test('E2EE Message Reactions: encrypted storage, multi-recipient decryption, update/remove, and 403 isolation', async () => {
+    const alice = await registerUser('react_a@nexora.test', 'ReactAlice');
+    const bob = await registerUser('react_b@nexora.test', 'ReactBob');
+    const eve = await registerUser('react_e@nexora.test', 'ReactEve');
+
+    const convRes = await api(
+      '/api/v1/conversations/private',
+      { method: 'POST', body: JSON.stringify({ userId: bob.user.id }) },
+      alice.token
+    );
+    assert.equal(convRes.status, 201);
+    const convId = convRes.data.conversationId as string;
+
+    const msgId = crypto.randomUUID();
+    const sendRes = await api(
+      `/api/v1/conversations/${convId}/messages`,
+      {
+        method: 'POST',
+        body: JSON.stringify({
+          id: msgId,
+          kind: 'text',
+          ciphertext: bufToB64(crypto.randomBytes(24)),
+          iv: bufToB64(crypto.randomBytes(12)),
+          aad: `${convId}:${alice.user.id}:${msgId}`,
+          recipientEnvelopes: {},
+        }),
+      },
+      alice.token
+    );
+    assert.equal(sendRes.status, 201);
+
+    async function buildEncryptedReactionPayload(userId: string, emojis: string[]) {
+      const aad = `nexora-reaction:${convId}:${msgId}:${userId}`;
+      const rawKey = crypto.randomBytes(32);
+      const iv = crypto.randomBytes(12);
+      const aesKey = await subtle.importKey('raw', rawKey, { name: 'AES-GCM' }, false, ['encrypt']);
+      const ciphertextBuf = await subtle.encrypt(
+        { name: 'AES-GCM', iv, additionalData: enc.encode(aad) },
+        aesKey,
+        enc.encode(
+          JSON.stringify({
+            type: 'reaction',
+            conversationId: convId,
+            messageId: msgId,
+            userId,
+            emojis,
+            updatedAt: new Date().toISOString(),
+          })
+        )
+      );
+      const envAlice = await wrapKeyForRecipient(rawKey, alice.keys.ecdhPublicJwk, 'nexora-e2ee-reaction-v1');
+      const envBob = await wrapKeyForRecipient(rawKey, bob.keys.ecdhPublicJwk, 'nexora-e2ee-reaction-v1');
+      return {
+        ciphertext: bufToB64(ciphertextBuf),
+        iv: bufToB64(iv),
+        aad,
+        recipientEnvelopes: {
+          [alice.user.id]: envAlice,
+          [bob.user.id]: envBob,
+        },
+      };
+    }
+
+    // Tampered AAD rejected
+    const payload1 = await buildEncryptedReactionPayload(bob.user.id, ['❤️', '🔥']);
+    const badAadRes = await api(
+      `/api/v1/conversations/messages/${msgId}/reactions`,
+      {
+        method: 'POST',
+        body: JSON.stringify({ ...payload1, aad: `nexora-reaction:tampered:${msgId}:${bob.user.id}` }),
+      },
+      bob.token
+    );
+    assert.equal(badAadRes.status, 400);
+
+    // Non-participant Eve gets 403
+    const eveReact = await api(
+      `/api/v1/conversations/messages/${msgId}/reactions`,
+      {
+        method: 'POST',
+        body: JSON.stringify(await buildEncryptedReactionPayload(eve.user.id, ['😂'])),
+      },
+      eve.token
+    );
+    assert.equal(eveReact.status, 403);
+
+    // Bob adds E2EE reactions ['❤️', '🔥']
+    const bobReact1 = await api(
+      `/api/v1/conversations/messages/${msgId}/reactions`,
+      { method: 'POST', body: JSON.stringify(payload1) },
+      bob.token
+    );
+    assert.equal(bobReact1.status, 200);
+    assert.equal(bobReact1.data.reactions.length, 0);
+    assert.equal(bobReact1.data.encryptedReactions.length, 1);
+
+    // Verify DB stores opaque sentinel and ciphertext without plaintext emoji
+    const dbReactRows = await db
+      .select()
+      .from(messageReactions)
+      .where(eq(messageReactions.messageId, msgId));
+    assert.equal(dbReactRows.length, 1);
+    assert.equal(dbReactRows[0].emoji, '__e2ee__');
+    assert.equal(dbReactRows[0].ciphertext?.includes('❤️'), false);
+    assert.equal(dbReactRows[0].ciphertext?.includes('🔥'), false);
+
+    // Alice fetches message and decrypts Bob's E2EE reaction
+    const aliceMsgs = await api(`/api/v1/conversations/${convId}/messages`, {}, alice.token);
+    assert.equal(aliceMsgs.status, 200);
+    const encR = aliceMsgs.data.messages[0].encryptedReactions[0];
+    assert.ok(encR.recipientEnvelopes[alice.user.id]);
+    assert.equal(encR.recipientEnvelopes[bob.user.id], undefined);
+    const unwrappedKey = await unwrapKey(
+      encR.recipientEnvelopes[alice.user.id],
+      alice.keys.ecdhPrivateKey,
+      'nexora-e2ee-reaction-v1'
+    );
+    const aesDecryptKey = await subtle.importKey('raw', unwrappedKey, { name: 'AES-GCM' }, false, ['decrypt']);
+    const plainReactBuf = await subtle.decrypt(
+      { name: 'AES-GCM', iv: b64ToBuf(encR.iv), additionalData: enc.encode(encR.aad) },
+      aesDecryptKey,
+      b64ToBuf(encR.ciphertext)
+    );
+    const decodedReact = JSON.parse(dec.decode(plainReactBuf));
+    assert.deepEqual(decodedReact.emojis, ['❤️', '🔥']);
+    assert.equal(decodedReact.userId, bob.user.id);
+
+    // Bob updates reaction to ['🔥'] (upsert overwrites previous encrypted row)
+    const payload2 = await buildEncryptedReactionPayload(bob.user.id, ['🔥']);
+    const bobReact2 = await api(
+      `/api/v1/conversations/messages/${msgId}/reactions`,
+      { method: 'POST', body: JSON.stringify(payload2) },
+      bob.token
+    );
+    assert.equal(bobReact2.status, 200);
+    const encR2 = bobReact2.data.encryptedReactions[0];
+    const unwrappedKey2 = await unwrapKey(
+      encR2.recipientEnvelopes[bob.user.id],
+      bob.keys.ecdhPrivateKey,
+      'nexora-e2ee-reaction-v1'
+    );
+    const aesDecryptKey2 = await subtle.importKey('raw', unwrappedKey2, { name: 'AES-GCM' }, false, ['decrypt']);
+    const plainReactBuf2 = await subtle.decrypt(
+      { name: 'AES-GCM', iv: b64ToBuf(encR2.iv), additionalData: enc.encode(encR2.aad) },
+      aesDecryptKey2,
+      b64ToBuf(encR2.ciphertext)
+    );
+    assert.deepEqual(JSON.parse(dec.decode(plainReactBuf2)).emojis, ['🔥']);
+
+    // Bob removes all reactions
+    const bobRemove = await api(
+      `/api/v1/conversations/messages/${msgId}/reactions`,
+      { method: 'POST', body: JSON.stringify({ remove: true }) },
+      bob.token
+    );
+    assert.equal(bobRemove.status, 200);
+    assert.equal(bobRemove.data.encryptedReactions.length, 0);
+    const dbAfterRemove = await db
+      .select()
+      .from(messageReactions)
+      .where(eq(messageReactions.messageId, msgId));
+    assert.equal(dbAfterRemove.length, 0);
   });
 
   test('Groups: 25-member transactional cap & Epoch rotation on removal', async () => {

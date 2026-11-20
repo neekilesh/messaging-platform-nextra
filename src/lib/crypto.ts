@@ -1,6 +1,7 @@
 import type {
   DecryptedMessagePayload,
   EncryptedKeyBackup,
+  EncryptedMessageReaction,
   GroupEpochEnvelope,
   RecipientEnvelope,
   SignedEncryptedReadReceipt,
@@ -735,3 +736,154 @@ export async function decryptAndVerifyReadReceipt(params: {
   };
 }
 
+export async function encryptMessageReaction(params: {
+  conversationId: string;
+  messageId: string;
+  userId: string;
+  emojis: string[];
+  recipients?: Array<{ userId: string; ecdhPublicJwk: string }>;
+  groupEpochKeyRaw?: Uint8Array | null;
+  groupEpoch?: number | null;
+}): Promise<{
+  ciphertext: string;
+  iv: string;
+  aad: string;
+  recipientEnvelopes: Record<string, RecipientEnvelope> | null;
+  epoch: number | null;
+}> {
+  const normalizedEmojis = Array.from(
+    new Set(params.emojis.map((e) => e.trim()).filter((e) => e.length > 0 && e.length <= 16))
+  );
+  const aad = `nexora-reaction:${params.conversationId}:${params.messageId}:${params.userId}`;
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const innerPayload = JSON.stringify({
+    type: 'reaction',
+    conversationId: params.conversationId,
+    messageId: params.messageId,
+    userId: params.userId,
+    emojis: normalizedEmojis,
+    updatedAt: new Date().toISOString(),
+  });
+
+  if (params.groupEpochKeyRaw && typeof params.groupEpoch === 'number') {
+    const aesKey = await crypto.subtle.importKey(
+      'raw',
+      toArrayBuffer(params.groupEpochKeyRaw),
+      { name: 'AES-GCM' },
+      false,
+      ['encrypt']
+    );
+    const cipherBuf = await crypto.subtle.encrypt(
+      { name: 'AES-GCM', iv, additionalData: enc.encode(aad) },
+      aesKey,
+      enc.encode(innerPayload)
+    );
+    return {
+      ciphertext: bufToB64(cipherBuf),
+      iv: bufToB64(iv),
+      aad,
+      recipientEnvelopes: null,
+      epoch: params.groupEpoch,
+    };
+  }
+
+  if (params.recipients && params.recipients.length > 0) {
+    const rawKey = crypto.getRandomValues(new Uint8Array(32));
+    const aesKey = await crypto.subtle.importKey('raw', rawKey, { name: 'AES-GCM' }, false, ['encrypt']);
+    const cipherBuf = await crypto.subtle.encrypt(
+      { name: 'AES-GCM', iv, additionalData: enc.encode(aad) },
+      aesKey,
+      enc.encode(innerPayload)
+    );
+    const recipientEnvelopes = await wrapSymmetricKeyForRecipients(
+      rawKey,
+      params.recipients,
+      'nexora-e2ee-reaction-v1'
+    );
+    return {
+      ciphertext: bufToB64(cipherBuf),
+      iv: bufToB64(iv),
+      aad,
+      recipientEnvelopes,
+      epoch: null,
+    };
+  }
+
+  throw new Error('Missing encryption key material for E2EE reaction.');
+}
+
+export async function decryptMessageReaction(params: {
+  conversationId: string;
+  messageId: string;
+  reaction: EncryptedMessageReaction;
+  myUserId: string;
+  myEcdhPrivateJwk: JsonWebKey;
+  groupEpochKeyRaw?: Uint8Array | null;
+}): Promise<string[]> {
+  const { conversationId, messageId, reaction, myUserId, myEcdhPrivateJwk, groupEpochKeyRaw } = params;
+  const expectedAad = `nexora-reaction:${conversationId}:${messageId}:${reaction.userId}`;
+  if (reaction.aad !== expectedAad || !reaction.ciphertext || !reaction.iv) {
+    return [];
+  }
+
+  try {
+    let rawAesBytes: Uint8Array | null = null;
+    if (typeof reaction.epoch === 'number') {
+      if (!groupEpochKeyRaw) return [];
+      rawAesBytes = groupEpochKeyRaw;
+    } else if (reaction.recipientEnvelopes?.[myUserId]) {
+      rawAesBytes = await unwrapSymmetricKey(
+        reaction.recipientEnvelopes[myUserId],
+        myEcdhPrivateJwk,
+        'nexora-e2ee-reaction-v1'
+      );
+    }
+
+    if (!rawAesBytes) return [];
+
+    const aesKey = await crypto.subtle.importKey(
+      'raw',
+      toArrayBuffer(rawAesBytes),
+      { name: 'AES-GCM' },
+      false,
+      ['decrypt']
+    );
+    const plainBuf = await crypto.subtle.decrypt(
+      {
+        name: 'AES-GCM',
+        iv: toArrayBuffer(b64ToBuf(reaction.iv)),
+        additionalData: enc.encode(reaction.aad),
+      },
+      aesKey,
+      toArrayBuffer(b64ToBuf(reaction.ciphertext))
+    );
+    const parsed = JSON.parse(dec.decode(plainBuf)) as {
+      type?: string;
+      conversationId?: string;
+      messageId?: string;
+      userId?: string;
+      emojis?: unknown;
+    };
+
+    if (
+      parsed.type !== 'reaction' ||
+      parsed.conversationId !== conversationId ||
+      parsed.messageId !== messageId ||
+      parsed.userId !== reaction.userId ||
+      !Array.isArray(parsed.emojis)
+    ) {
+      return [];
+    }
+
+    return Array.from(
+      new Set(
+        parsed.emojis
+          .filter((e): e is string => typeof e === 'string')
+          .map((e) => e.trim())
+          .filter((e) => e.length > 0 && e.length <= 16)
+      )
+    );
+  } catch {
+    return [];
+  }
+}

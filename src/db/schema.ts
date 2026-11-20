@@ -384,6 +384,11 @@ export const messageReactions = pgTable(
       .notNull()
       .references(() => users.id, { onDelete: 'cascade' }),
     emoji: text('emoji').notNull(),
+    ciphertext: text('ciphertext'),
+    iv: text('iv'),
+    aad: text('aad'),
+    recipientEnvelopesJson: text('recipient_envelopes_json'),
+    epoch: integer('epoch'),
     createdAt: text('created_at').notNull(),
   },
   (table) => [
@@ -459,6 +464,75 @@ export const notifications = pgTable(
     createdAt: text('created_at').notNull(),
   },
   (table) => [index('idx_notifications_user').on(table.userId, table.createdAt)]
+);
+
+export const aiThreads = pgTable(
+  'ai_threads',
+  {
+    id: text('id').primaryKey(),
+    userId: text('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    title: text('title').notNull(),
+    model: text('model').notNull(),
+    persona: text('persona').notNull().default('General Assistant'),
+    systemInstruction: text('system_instruction').notNull().default(''),
+    createdAt: text('created_at').notNull(),
+    updatedAt: text('updated_at').notNull(),
+  },
+  (table) => [index('idx_ai_threads_user').on(table.userId, table.updatedAt)]
+);
+
+export const aiMessages = pgTable(
+  'ai_messages',
+  {
+    id: text('id').primaryKey(),
+    threadId: text('thread_id')
+      .notNull()
+      .references(() => aiThreads.id, { onDelete: 'cascade' }),
+    userId: text('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    role: text('role').notNull(),
+    content: text('content').notNull(),
+    model: text('model').notNull(),
+    groundingJson: text('grounding_json'),
+    createdAt: text('created_at').notNull(),
+  },
+  (table) => [index('idx_ai_messages_thread').on(table.threadId, table.createdAt)]
+);
+
+export const aiArtifacts = pgTable(
+  'ai_artifacts',
+  {
+    id: text('id').primaryKey(),
+    userId: text('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    kind: text('kind').notNull(),
+    model: text('model').notNull(),
+    prompt: text('prompt').notNull(),
+    mimeType: text('mime_type').notNull(),
+    dataUrl: text('data_url').notNull(),
+    metadataJson: text('metadata_json'),
+    createdAt: text('created_at').notNull(),
+  },
+  (table) => [index('idx_ai_artifacts_user').on(table.userId, table.createdAt)]
+);
+
+export const gameScores = pgTable(
+  'game_scores',
+  {
+    id: text('id').primaryKey(),
+    userId: text('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    mode: text('mode').notNull().default('arcade'),
+    score: integer('score').notNull(),
+    wave: integer('wave').notNull().default(1),
+    createdAt: text('created_at').notNull(),
+  },
+  (table) => [index('idx_game_scores_score').on(table.score)]
 );
 
 export const usersRelations = relations(users, ({ many, one }) => ({

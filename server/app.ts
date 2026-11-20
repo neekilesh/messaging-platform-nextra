@@ -15,6 +15,7 @@ import { createGroupsRouter } from './routes/groups.ts';
 import { createMediaRouter } from './routes/media.ts';
 import { createStoriesRouter } from './routes/stories.ts';
 import { createNotificationsRouter } from './routes/notifications.ts';
+import { createAiRouter } from './routes/ai.ts';
 import { getIO } from './context.ts';
 
 export async function runRetentionCleanup(database: PgDatabase) {
@@ -91,7 +92,7 @@ export function createApiApp(database: PgDatabase) {
     return next();
   });
 
-  app.use(express.json({ limit: '5mb' }));
+  app.use(express.json({ limit: '25mb' }));
 
   app.get('/api/v1/health', async (_req, res) => {
     let databaseStatus: 'connected' | 'disconnected' = 'disconnected';
@@ -112,6 +113,7 @@ export function createApiApp(database: PgDatabase) {
   app.use('/api/v1/media', createMediaRouter(database));
   app.use('/api/v1/stories', createStoriesRouter(database));
   app.use('/api/v1/notifications', createNotificationsRouter(database));
+  app.use('/api/v1/ai', createAiRouter(database));
 
   app.use('/api', (_req, res) => {
     return res.status(404).json({ error: 'API endpoint not found.' });

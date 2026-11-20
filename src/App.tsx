@@ -1,11 +1,15 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { AnimatePresence, motion } from 'motion/react';
 import {
+  AlertTriangle,
   Bell,
   CircleDot,
+  Gamepad2,
   Lock,
+  MapPin,
   MessageSquare,
   Settings,
+  Sparkles,
   Users,
 } from 'lucide-react';
 import { apiRequest, getStoredToken, setStoredToken } from './lib/api';
@@ -42,8 +46,20 @@ import { StoryViewer } from './components/stories/StoryViewer';
 import { PeoplePanel } from './components/social/PeoplePanel';
 import { NotificationsPanel } from './components/social/NotificationsPanel';
 import { SettingsPanel } from './components/settings/SettingsPanel';
+import { AiStudioHub } from './components/ai/AiStudioHub';
+import { MapsExplorerPanel } from './components/maps/MapsExplorerPanel';
+import { NexusArena3D } from './components/three/NexusArena3D';
 
-type NavTab = 'chats' | 'groups' | 'stories' | 'people' | 'notifications' | 'settings';
+type NavTab =
+  | 'chats'
+  | 'groups'
+  | 'stories'
+  | 'ai'
+  | 'maps'
+  | 'arena3d'
+  | 'people'
+  | 'notifications'
+  | 'settings';
 
 export default function App() {
   const { effectiveReducedMotion, soundEnabled, soundPack } = useVisualPrefs();
@@ -86,6 +102,13 @@ export default function App() {
   const [showCreateGroup, setShowCreateGroup] = useState(false);
   const [showCreateStory, setShowCreateStory] = useState(false);
   const [storyViewerIndex, setStoryViewerIndex] = useState<number | null>(null);
+  const [mapsQuotaExceeded, setMapsQuotaExceeded] = useState(false);
+
+  useEffect(() => {
+    const onQuotaExceeded = () => setMapsQuotaExceeded(true);
+    window.addEventListener('gmp-quota-exceeded', onQuotaExceeded);
+    return () => window.removeEventListener('gmp-quota-exceeded', onQuotaExceeded);
+  }, []);
 
   useEffect(() => {
     const onOnline = () => setIsOnline(true);
@@ -335,6 +358,9 @@ export default function App() {
     { id: 'chats', label: 'Chats', icon: MessageSquare, badge: totalUnreadMsgs },
     { id: 'groups', label: 'Groups', icon: Users },
     { id: 'stories', label: 'Stories', icon: CircleDot },
+    { id: 'ai', label: 'AI Studio', icon: Sparkles },
+    { id: 'maps', label: 'Maps', icon: MapPin },
+    { id: 'arena3d', label: '3D Arena', icon: Gamepad2 },
     { id: 'people', label: 'People', icon: Users, badge: pendingReqCount },
     { id: 'notifications', label: 'Alerts', icon: Bell, badge: unreadNotifs },
     { id: 'settings', label: 'Settings', icon: Settings },
@@ -347,6 +373,37 @@ export default function App() {
     <div className="h-screen w-screen overflow-hidden nexora-cosmos flex flex-col md:flex-row relative">
       <CosmicBackdrop />
       <ConnectionStatusBanner isOnline={isOnline} socketStatus={socketStatus} />
+
+      {mapsQuotaExceeded && (
+        <div
+          role="alert"
+          className="fixed top-0 left-0 right-0 z-50 bg-amber-950/95 border-b border-amber-500/40 px-4 py-2.5 flex flex-wrap items-center justify-between gap-3 text-xs text-amber-100"
+        >
+          <div className="flex items-center gap-2">
+            <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0" />
+            <span>
+              The free Google Maps demo key has reached its quota limit. To continue uninterrupted, configure your own Google Cloud API key or review quota options.
+            </span>
+          </div>
+          <div className="flex items-center gap-3">
+            <a
+              href="https://developers.google.com/maps/ai/ai-studio?utm_campaign=gmp_mcp_codeassist_v1_aistudio#quota_exceeded_errors"
+              target="_blank"
+              rel="noreferrer"
+              className="font-semibold text-amber-300 underline hover:text-white"
+            >
+              Learn more
+            </a>
+            <button
+              type="button"
+              onClick={() => setMapsQuotaExceeded(false)}
+              className="text-amber-300 hover:text-white cursor-pointer"
+            >
+              Dismiss
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* Desktop Left Navigation Rail */}
       <aside className="relative z-10 hidden md:flex w-[76px] border-r border-white/10 bg-[#090d1c]/85 backdrop-blur-xl flex-col items-center justify-between py-5 shrink-0">
@@ -529,6 +586,12 @@ export default function App() {
                 onOpenCreate={() => setShowCreateStory(true)}
                 onOpenStoryIndex={(idx) => setStoryViewerIndex(idx)}
               />
+            ) : navTab === 'ai' ? (
+              <AiStudioHub />
+            ) : navTab === 'maps' ? (
+              <MapsExplorerPanel />
+            ) : navTab === 'arena3d' ? (
+              <NexusArena3D onExit={() => setNavTab('chats')} />
             ) : navTab === 'people' ? (
               <PeoplePanel
                 friends={friends}
@@ -554,7 +617,7 @@ export default function App() {
       </main>
 
       {/* Mobile Bottom Tab Bar (Thumb-zone ergonomic, compact height) */}
-      <nav className="md:hidden fixed bottom-0 left-0 right-0 z-40 h-16 bg-[#090d1c]/95 backdrop-blur-lg border-t border-white/10 grid grid-cols-5 items-center">
+      <nav className="md:hidden fixed bottom-0 left-0 right-0 z-40 h-16 bg-[#090d1c]/95 backdrop-blur-lg border-t border-white/10 flex items-center overflow-x-auto">
         {navItems
           .filter((n) => n.id !== 'groups')
           .map((item) => {
@@ -568,7 +631,7 @@ export default function App() {
                   setNavTab(item.id);
                   if (item.id === 'chats') setChatFilter('all');
                 }}
-                className={`relative flex flex-col items-center justify-center h-full gap-1 cursor-pointer transition-colors ${
+                className={`relative flex-1 min-w-[60px] flex flex-col items-center justify-center h-full gap-1 cursor-pointer transition-colors ${
                   active ? 'text-cyan-300' : 'text-slate-400'
                 }`}
               >

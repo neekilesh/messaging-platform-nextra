@@ -31,9 +31,11 @@ import { apiRequest, uploadEncryptedMedia } from '../../lib/api';
 import {
   decryptAndVerifyReadReceipt,
   decryptGroupMessage,
+  decryptMessageReaction,
   decryptPrivateMessage,
   encryptGroupMessage,
   encryptMediaBlob,
+  encryptMessageReaction,
   encryptPrivateMessage,
   signAndEncryptReadReceipt,
   unwrapGroupEpochKey,
@@ -45,8 +47,10 @@ import { useVisualPrefs } from '../../lib/theme';
 import type {
   ConversationSummary,
   DecryptedMessagePayload,
+  EncryptedMessageReaction,
   GroupDetails,
   MessageKind,
+  MessageReactionItem,
   MessageRecord,
   SignedEncryptedReadReceipt,
   StreakInfo,
@@ -75,7 +79,7 @@ interface ChatWindowProps {
   onConversationUpdated: () => void;
 }
 
-const REACTION_EMOJIS = ['❤️', '🔥', '😂', '😮', '👍', '✨'];
+const REACTION_EMOJIS = ['❤️', '🔥', '😂', '😮', '😢', '👍', '✨', '🙏'];
 
 const DISAPPEARING_OPTIONS = [
   { label: 'Off', seconds: 0 },
@@ -132,6 +136,7 @@ export function ChatWindow({
   const [forwardTarget, setForwardTarget] = useState<MessageRecord | null>(null);
   const [activeMenuMsgId, setActiveMenuMsgId] = useState<string | null>(null);
   const [reactMsgId, setReactMsgId] = useState<string | null>(null);
+  const [pressingMsgId, setPressingMsgId] = useState<string | null>(null);
 
   const [showSearch, setShowSearch] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
@@ -146,10 +151,15 @@ export function ChatWindow({
   const groupDetailsRef = useRef<GroupDetails | null>(null);
   const epochKeysRef = useRef<Map<number, Uint8Array>>(new Map());
   const sentReceiptIdsRef = useRef<Set<string>>(new Set());
+  const messagesRef = useRef<MessageRecord[]>([]);
+  messagesRef.current = messages;
 
   const bottomRef = useRef<HTMLDivElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const typingTimeoutRef = useRef<number | null>(null);
+  const longPressTimerRef = useRef<number | null>(null);
+  const longPressStartRef = useRef<{ x: number; y: number; msgId: string } | null>(null);
+  const suppressNextCloseRef = useRef<number>(0);
 
   const getSignerEcdsaKey = (readerId: string): string | null => {
     if (conversation.type === 'private') {
@@ -251,10 +261,68 @@ export function ChatWindow({
     }
   };
 
+  const resolveMessageReactions = async (
+    messageId: string,
+    legacyReactions: MessageReactionItem[],
+    encryptedReactions?: EncryptedMessageReaction[]
+  ): Promise<MessageReactionItem[]> => {
+    const emojiUsers = new Map<string, Set<string>>();
+
+    for (const item of legacyReactions || []) {
+      if (!item.emoji || item.emoji === '__e2ee__') continue;
+      const set = emojiUsers.get(item.emoji) || new Set<string>();
+      for (const uid of item.userIds) set.add(uid);
+      emojiUsers.set(item.emoji, set);
+    }
+
+    if (encryptedReactions && encryptedReactions.length > 0) {
+      if (
+        conversation.type === 'group' &&
+        encryptedReactions.some((r) => typeof r.epoch === 'number' && !epochKeysRef.current.has(r.epoch))
+      ) {
+        await loadGroupEpochKeys();
+      }
+
+      for (const encItem of encryptedReactions) {
+        const epochKeyRaw =
+          typeof encItem.epoch === 'number' ? epochKeysRef.current.get(encItem.epoch) || null : null;
+        const emojis = await decryptMessageReaction({
+          conversationId: conversation.id,
+          messageId,
+          reaction: encItem,
+          myUserId: currentUserId,
+          myEcdhPrivateJwk: myKeys.ecdhPrivateJwk,
+          groupEpochKeyRaw: epochKeyRaw,
+        });
+        for (const em of emojis) {
+          const set = emojiUsers.get(em) || new Set<string>();
+          set.add(encItem.userId);
+          emojiUsers.set(em, set);
+        }
+      }
+    }
+
+    return Array.from(emojiUsers.entries())
+      .map(([emoji, usersSet]) => ({
+        emoji,
+        userIds: Array.from(usersSet),
+        count: usersSet.size,
+      }))
+      .sort((a, b) => {
+        if (b.count !== a.count) return b.count - a.count;
+        const ia = REACTION_EMOJIS.indexOf(a.emoji);
+        const ib = REACTION_EMOJIS.indexOf(b.emoji);
+        if (ia !== -1 && ib !== -1) return ia - ib;
+        if (ia !== -1) return -1;
+        if (ib !== -1) return 1;
+        return a.emoji.localeCompare(b.emoji);
+      });
+  };
+
   const decryptMessageItem = async (msg: MessageRecord): Promise<MessageRecord> => {
     let resolved: MessageRecord;
     if (msg.deletedForEveryone) {
-      resolved = { ...msg, localDecrypted: { text: '' } };
+      resolved = { ...msg, reactions: [], encryptedReactions: [], localDecrypted: { text: '' } };
     } else {
       try {
         if (conversation.type === 'private') {
@@ -286,6 +354,15 @@ export function ChatWindow({
         }
       } catch {
         resolved = { ...msg, localDecrypted: { text: '[Unable to decrypt with current key]' } };
+      }
+
+      if (resolved.encryptedReactions && resolved.encryptedReactions.length > 0) {
+        const mergedReactions = await resolveMessageReactions(
+          resolved.id,
+          resolved.reactions || [],
+          resolved.encryptedReactions
+        );
+        resolved = { ...resolved, reactions: mergedReactions };
       }
     }
     return verifyMessageReadReceipts(resolved);
@@ -394,6 +471,9 @@ export function ChatWindow({
     groupDetailsRef.current = null;
     setReplyTarget(null);
     setEditTarget(null);
+    setReactMsgId(null);
+    setActiveMenuMsgId(null);
+    setPressingMsgId(null);
     setShowGroupDrawer(false);
     setShowSearch(false);
     setSearchQuery('');
@@ -403,6 +483,37 @@ export function ChatWindow({
     sock?.emit('conversation:join', conversation.id);
     loadMessages();
   }, [conversation.id]);
+
+  useEffect(() => {
+    if (!reactMsgId && !activeMenuMsgId) return;
+    const handlePointerDownOutside = (e: PointerEvent) => {
+      if (Date.now() < suppressNextCloseRef.current) return;
+      const target = e.target as HTMLElement | null;
+      if (target?.closest('[data-reaction-tray], [data-reaction-trigger]')) return;
+      setReactMsgId(null);
+      setActiveMenuMsgId(null);
+    };
+    const handleEscape = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        setReactMsgId(null);
+        setActiveMenuMsgId(null);
+      }
+    };
+    document.addEventListener('pointerdown', handlePointerDownOutside);
+    document.addEventListener('keydown', handleEscape);
+    return () => {
+      document.removeEventListener('pointerdown', handlePointerDownOutside);
+      document.removeEventListener('keydown', handleEscape);
+    };
+  }, [reactMsgId, activeMenuMsgId]);
+
+  useEffect(() => {
+    return () => {
+      if (longPressTimerRef.current) {
+        window.clearTimeout(longPressTimerRef.current);
+      }
+    };
+  }, []);
 
   useEffect(() => {
     if (streakTrackerRef.current.conversationId !== conversation.id) return;
@@ -494,10 +605,28 @@ export function ChatWindow({
       setMessages((prev) => prev.filter((m) => m.id !== data.messageId));
     };
 
-    const handleReactions = (data: { conversationId: string; messageId: string; reactions: MessageRecord['reactions'] }) => {
+    const handleReactions = async (data: {
+      conversationId: string;
+      messageId: string;
+      reactions: MessageRecord['reactions'];
+      encryptedReactions?: EncryptedMessageReaction[];
+    }) => {
       if (data.conversationId !== conversation.id) return;
+      const resolved = await resolveMessageReactions(
+        data.messageId,
+        data.reactions || [],
+        data.encryptedReactions
+      );
       setMessages((prev) =>
-        prev.map((m) => (m.id === data.messageId ? { ...m, reactions: data.reactions } : m))
+        prev.map((m) =>
+          m.id === data.messageId
+            ? {
+                ...m,
+                reactions: resolved,
+                encryptedReactions: data.encryptedReactions || [],
+              }
+            : m
+        )
       );
     };
 
@@ -893,17 +1022,151 @@ export function ChatWindow({
     }, 1500);
   };
 
+  const cancelLongPress = () => {
+    if (longPressTimerRef.current) {
+      window.clearTimeout(longPressTimerRef.current);
+      longPressTimerRef.current = null;
+    }
+    longPressStartRef.current = null;
+    setPressingMsgId(null);
+  };
+
+  const handleBubblePointerDown = (e: React.PointerEvent<HTMLDivElement>, msg: MessageRecord) => {
+    if (msg.deletedForEveryone) return;
+    if (e.pointerType === 'mouse' && e.button !== 0) return;
+    const target = e.target as HTMLElement | null;
+    if (target?.closest('button, a, input, audio, video, [data-no-longpress]')) return;
+
+    cancelLongPress();
+    longPressStartRef.current = { x: e.clientX, y: e.clientY, msgId: msg.id };
+    setPressingMsgId(msg.id);
+
+    longPressTimerRef.current = window.setTimeout(() => {
+      longPressTimerRef.current = null;
+      longPressStartRef.current = null;
+      setPressingMsgId(null);
+      setActiveMenuMsgId(null);
+      suppressNextCloseRef.current = Date.now() + 400;
+      setReactMsgId(msg.id);
+      if (typeof navigator !== 'undefined' && typeof navigator.vibrate === 'function') {
+        navigator.vibrate(12);
+      }
+    }, 430);
+  };
+
+  const handleBubblePointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
+    const start = longPressStartRef.current;
+    if (!start) return;
+    const dist = Math.hypot(e.clientX - start.x, e.clientY - start.y);
+    if (dist > 10) {
+      cancelLongPress();
+    }
+  };
+
   const toggleReaction = async (messageId: string, emoji: string) => {
     setReactMsgId(null);
     setActiveMenuMsgId(null);
+    const targetMsg = messagesRef.current.find((m) => m.id === messageId);
+    if (!targetMsg || targetMsg.deletedForEveryone) return;
+
+    const prevReactions = targetMsg.reactions;
+    const currentUserEmojis = prevReactions
+      .filter((r) => r.userIds.includes(currentUserId))
+      .map((r) => r.emoji);
+    const alreadyHas = currentUserEmojis.includes(emoji);
+    const nextUserEmojis = alreadyHas
+      ? currentUserEmojis.filter((e) => e !== emoji)
+      : [...currentUserEmojis, emoji];
+
+    // Optimistic UI update
+    const optimisticReactions: MessageReactionItem[] = prevReactions
+      .map((r) => {
+        if (r.emoji !== emoji) return r;
+        const nextUsers = alreadyHas
+          ? r.userIds.filter((id) => id !== currentUserId)
+          : Array.from(new Set([...r.userIds, currentUserId]));
+        return { ...r, userIds: nextUsers, count: nextUsers.length };
+      })
+      .filter((r) => r.count > 0);
+    if (!alreadyHas && !optimisticReactions.some((r) => r.emoji === emoji)) {
+      optimisticReactions.push({ emoji, userIds: [currentUserId], count: 1 });
+    }
+
+    setMessages((prev) =>
+      prev.map((m) => (m.id === messageId ? { ...m, reactions: optimisticReactions } : m))
+    );
     playMagicalSound('reaction', soundPrefsRef.current.soundPack, soundPrefsRef.current.soundEnabled);
-    if (!prefersReducedMotion) {
+    if (!prefersReducedMotion && !alreadyHas) {
       setReactionBurst({ key: `${messageId}:${emoji}`, ts: Date.now() });
     }
-    await apiRequest(`/api/v1/conversations/messages/${messageId}/reactions`, {
-      method: 'POST',
-      body: JSON.stringify({ emoji }),
-    }).catch(() => {});
+
+    try {
+      let bodyPayload: Record<string, unknown>;
+      if (nextUserEmojis.length === 0) {
+        bodyPayload = { remove: true };
+      } else if (conversation.type === 'private') {
+        const recipients: Array<{ userId: string; ecdhPublicJwk: string }> = [
+          { userId: currentUserId, ecdhPublicJwk: JSON.stringify(myKeys.ecdhPublicJwk) },
+        ];
+        if (conversation.peerUser?.ecdhPublicJwk) {
+          recipients.push({
+            userId: conversation.peerUser.id,
+            ecdhPublicJwk: conversation.peerUser.ecdhPublicJwk,
+          });
+        }
+        bodyPayload = await encryptMessageReaction({
+          conversationId: conversation.id,
+          messageId,
+          userId: currentUserId,
+          emojis: nextUserEmojis,
+          recipients,
+        });
+      } else {
+        const currentEpoch = groupDetailsRef.current?.currentEpoch || conversation.currentEpoch || 1;
+        let epochKey = epochKeysRef.current.get(currentEpoch);
+        if (!epochKey) {
+          await loadGroupEpochKeys();
+          epochKey = epochKeysRef.current.get(currentEpoch);
+        }
+        if (!epochKey) {
+          throw new Error('Missing group epoch encryption key.');
+        }
+        bodyPayload = await encryptMessageReaction({
+          conversationId: conversation.id,
+          messageId,
+          userId: currentUserId,
+          emojis: nextUserEmojis,
+          groupEpochKeyRaw: epochKey,
+          groupEpoch: currentEpoch,
+        });
+      }
+
+      const res = await apiRequest<{
+        reactions: MessageReactionItem[];
+        encryptedReactions?: EncryptedMessageReaction[];
+      }>(`/api/v1/conversations/messages/${messageId}/reactions`, {
+        method: 'POST',
+        body: JSON.stringify(bodyPayload),
+      });
+
+      const resolved = await resolveMessageReactions(
+        messageId,
+        res.reactions || [],
+        res.encryptedReactions
+      );
+      setMessages((prev) =>
+        prev.map((m) =>
+          m.id === messageId
+            ? { ...m, reactions: resolved, encryptedReactions: res.encryptedReactions || [] }
+            : m
+        )
+      );
+    } catch (err) {
+      setMessages((prev) =>
+        prev.map((m) => (m.id === messageId ? { ...m, reactions: prevReactions } : m))
+      );
+      setErrorBanner(err instanceof Error ? err.message : 'Failed to send encrypted reaction.');
+    }
   };
 
   const togglePin = async (msg: MessageRecord) => {
@@ -1273,10 +1536,11 @@ export function ChatWindow({
                     </p>
                   </motion.div>
                 ) : null}
-                {visibleMessages.map((msg) => {
+                {visibleMessages.map((msg, idx) => {
                   const isMine = msg.senderId === currentUserId;
                   const dec = msg.localDecrypted;
                   const isLiveArrival = liveArrivalIds.has(msg.id);
+                  const placeTrayBelow = idx === 0;
 
                   return (
                     <motion.div
@@ -1322,7 +1586,9 @@ export function ChatWindow({
                             }
                       }
                       style={{ transformOrigin: isMine ? 'bottom right' : 'bottom left' }}
-                      className={`flex flex-col ${isMine ? 'items-end' : 'items-start'} group relative`}
+                      className={`flex flex-col ${isMine ? 'items-end' : 'items-start'} group relative ${
+                        reactMsgId === msg.id || activeMenuMsgId === msg.id ? 'z-30' : ''
+                      }`}
                     >
                       {conversation.type === 'group' && !isMine && (
                         <span className="text-[11px] text-slate-400 ml-1 mb-1">
@@ -1330,17 +1596,88 @@ export function ChatWindow({
                         </span>
                       )}
 
-                      <div className={`flex items-end gap-2 max-w-[85%] sm:max-w-[70%] ${isMine ? 'flex-row-reverse' : ''}`}>
+                      <div className={`relative flex items-end gap-2 max-w-[85%] sm:max-w-[70%] ${isMine ? 'flex-row-reverse' : ''}`}>
+                        <AnimatePresence>
+                          {reactMsgId === msg.id && !msg.deletedForEveryone && (
+                            <motion.div
+                              data-reaction-tray="true"
+                              initial={
+                                prefersReducedMotion
+                                  ? false
+                                  : { opacity: 0, y: placeTrayBelow ? -8 : 8, scale: 0.92 }
+                              }
+                              animate={{ opacity: 1, y: 0, scale: 1 }}
+                              exit={
+                                prefersReducedMotion
+                                  ? undefined
+                                  : { opacity: 0, y: placeTrayBelow ? -6 : 6, scale: 0.94 }
+                              }
+                              transition={{ type: 'spring', stiffness: 460, damping: 28 }}
+                              className={`absolute ${
+                                placeTrayBelow ? 'top-full mt-2' : 'bottom-full mb-2'
+                              } ${
+                                isMine ? 'right-0' : 'left-0'
+                              } nexora-glass rounded-2xl px-2 py-1.5 flex items-center gap-1 z-30 shadow-[0_12px_32px_rgba(3,7,18,0.65)] border border-violet-400/30`}
+                            >
+                              {REACTION_EMOJIS.map((em) => {
+                                const isSelected = msg.reactions.some(
+                                  (r) => r.emoji === em && r.userIds.includes(currentUserId)
+                                );
+                                return (
+                                  <motion.button
+                                    key={em}
+                                    type="button"
+                                    whileTap={prefersReducedMotion ? undefined : { scale: 0.85 }}
+                                    whileHover={prefersReducedMotion ? undefined : { scale: 1.18, y: -2 }}
+                                    onClick={() => toggleReaction(msg.id, em)}
+                                    aria-label={`React with ${em}`}
+                                    aria-pressed={isSelected}
+                                    className={`w-8 h-8 rounded-xl text-base flex items-center justify-center transition-colors cursor-pointer ${
+                                      isSelected
+                                        ? 'bg-violet-500/35 ring-1 ring-violet-300/60 shadow-[0_0_10px_rgba(139,92,246,0.35)]'
+                                        : 'hover:bg-white/10'
+                                    }`}
+                                  >
+                                    {em}
+                                  </motion.button>
+                                );
+                              })}
+                              <span
+                                title="Reactions are end-to-end encrypted"
+                                aria-label="End-to-end encrypted reactions"
+                                className="pl-1 pr-0.5 text-cyan-300/80 flex items-center"
+                              >
+                                <Lock className="w-3 h-3" />
+                              </span>
+                            </motion.div>
+                          )}
+                        </AnimatePresence>
+
                         <div
                           data-cursor-interactive={msg.deletedForEveryone ? undefined : 'true'}
-                          className={`rounded-2xl px-4 py-2.5 text-sm leading-relaxed relative overflow-hidden transition-shadow ${
+                          onPointerDown={(e) => handleBubblePointerDown(e, msg)}
+                          onPointerMove={handleBubblePointerMove}
+                          onPointerUp={cancelLongPress}
+                          onPointerCancel={cancelLongPress}
+                          onContextMenu={(e) => {
+                            if (msg.deletedForEveryone) return;
+                            if ((e.target as HTMLElement | null)?.closest('a, input')) return;
+                            e.preventDefault();
+                            cancelLongPress();
+                            setActiveMenuMsgId(null);
+                            setReactMsgId((cur) => (cur === msg.id ? null : msg.id));
+                          }}
+                          title={msg.deletedForEveryone ? undefined : 'Long-press or click smile to add an encrypted reaction'}
+                          className={`rounded-2xl px-4 py-2.5 text-sm leading-relaxed relative overflow-hidden transition-[box-shadow,transform] duration-150 select-none sm:select-text touch-pan-y ${
                             msg.deletedForEveryone
                               ? 'bg-slate-900/60 border border-white/10 text-slate-500 italic'
                               : isMine
                               ? 'bg-gradient-to-br from-violet-600 to-indigo-600 text-white shadow-sm'
                               : 'bg-[#141a33] border border-white/10 text-slate-100'
                           } ${
-                            replyTarget?.id === msg.id
+                            pressingMsgId === msg.id
+                              ? 'scale-[0.97] ring-2 ring-cyan-400/60 shadow-[0_0_20px_rgba(34,211,238,0.28)]'
+                              : replyTarget?.id === msg.id
                               ? 'ring-2 ring-violet-400/65 shadow-[0_0_18px_rgba(139,92,246,0.28)]'
                               : msg.isPinned && !msg.deletedForEveryone
                               ? 'ring-1 ring-cyan-400/45 shadow-[0_0_16px_rgba(34,211,238,0.16)]'
@@ -1465,7 +1802,11 @@ export function ChatWindow({
                       <div className="relative opacity-0 group-hover:opacity-100 focus-within:opacity-100 transition-opacity flex items-center gap-0.5">
                         <button
                           type="button"
-                          onClick={() => setReactMsgId(reactMsgId === msg.id ? null : msg.id)}
+                          data-reaction-trigger="true"
+                          onClick={() => {
+                            setActiveMenuMsgId(null);
+                            setReactMsgId(reactMsgId === msg.id ? null : msg.id);
+                          }}
                           aria-label="React to message"
                           className="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-white/5 cursor-pointer"
                         >
@@ -1473,27 +1814,16 @@ export function ChatWindow({
                         </button>
                         <button
                           type="button"
-                          onClick={() => setActiveMenuMsgId(activeMenuMsgId === msg.id ? null : msg.id)}
+                          data-reaction-trigger="true"
+                          onClick={() => {
+                            setReactMsgId(null);
+                            setActiveMenuMsgId(activeMenuMsgId === msg.id ? null : msg.id);
+                          }}
                           aria-label="Message options"
                           className="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-white/5 cursor-pointer"
                         >
                           <MoreVertical className="w-3.5 h-3.5" />
                         </button>
-
-                        {reactMsgId === msg.id && (
-                          <div className="absolute bottom-8 right-0 nexora-glass rounded-xl p-1.5 flex items-center gap-1 z-20 shadow-xl">
-                            {REACTION_EMOJIS.map((em) => (
-                              <button
-                                key={em}
-                                type="button"
-                                onClick={() => toggleReaction(msg.id, em)}
-                                className="w-7 h-7 rounded-lg hover:bg-white/10 text-sm flex items-center justify-center cursor-pointer"
-                              >
-                                {em}
-                              </button>
-                            ))}
-                          </div>
-                        )}
 
                         {activeMenuMsgId === msg.id && (
                           <div className="absolute bottom-8 right-0 w-44 nexora-glass rounded-xl p-1.5 z-20 shadow-2xl text-xs space-y-0.5">
