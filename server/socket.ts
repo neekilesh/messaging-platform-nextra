@@ -10,6 +10,7 @@ import {
   users,
 } from '../src/db/schema.ts';
 import { authenticateToken, onlineUserSockets, parseCookies, setIO } from './context.ts';
+import { isValidIanaTimezone } from './connection-games-seed.ts';
 
 export function setupSocketServer(httpServer: HttpServer, database: PgDatabase): SocketIOServer {
   const io = new SocketIOServer(httpServer, {
@@ -64,7 +65,15 @@ export function setupSocketServer(httpServer: HttpServer, database: PgDatabase):
       }
 
       const nowIso = new Date().toISOString();
-      await database.update(users).set({ lastSeenAt: nowIso }).where(eq(users.id, userId));
+      const rawTz =
+        typeof socket.handshake.auth?.timezone === 'string'
+          ? socket.handshake.auth.timezone
+          : undefined;
+      const validTz = isValidIanaTimezone(rawTz);
+      await database
+        .update(users)
+        .set(validTz ? { lastSeenAt: nowIso, timezone: validTz } : { lastSeenAt: nowIso })
+        .where(eq(users.id, userId));
 
       if (wasOffline) {
         const privacyRows = await database
@@ -207,6 +216,62 @@ export function setupSocketServer(httpServer: HttpServer, database: PgDatabase):
         });
       } catch {
         // ignore delivery receipt error
+      }
+    });
+
+    socket.on('message:read', async (payload: { messageId?: string; conversationId?: string }) => {
+      const messageId = payload?.messageId;
+      if (!messageId) return;
+      try {
+        const privacyRows = await database
+          .select({ showReadReceipts: privacySettings.showReadReceipts })
+          .from(privacySettings)
+          .where(eq(privacySettings.userId, userId))
+          .limit(1);
+        const privacy = privacyRows[0];
+        if (privacy && privacy.showReadReceipts === 0) {
+          return; // respect user privacy preference to disable sending read receipts
+        }
+
+        const msgRows = await database
+          .select({
+            id: messages.id,
+            conversationId: messages.conversationId,
+            senderId: messages.senderId,
+          })
+          .from(messages)
+          .where(eq(messages.id, messageId))
+          .limit(1);
+        const msg = msgRows[0];
+        if (!msg || msg.senderId === userId) return;
+
+        const ts = new Date().toISOString();
+        await database
+          .insert(messageReceipts)
+          .values({
+            id: `${msg.id}:${userId}`,
+            messageId: msg.id,
+            userId,
+            status: 'read',
+            updatedAt: ts,
+          })
+          .onConflictDoUpdate({
+            target: [messageReceipts.messageId, messageReceipts.userId],
+            set: {
+              status: 'read',
+              updatedAt: ts,
+            },
+          });
+
+        io.to(`conv:${msg.conversationId}`).emit('message:receipt', {
+          conversationId: msg.conversationId,
+          messageId: msg.id,
+          userId,
+          status: 'read',
+          updatedAt: ts,
+        });
+      } catch {
+        // ignore read receipt socket error
       }
     });
 

@@ -1,14 +1,13 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useMemo, useState } from 'react';
 import { AnimatePresence, LayoutGroup, motion } from 'motion/react';
 import { Search, UserCheck, X } from 'lucide-react';
 import { audioManager } from '../../audio/AudioManager';
-import { withFriendStreakCountdown } from '../../lib/streak';
 import { useVisualPrefs } from '../../lib/theme';
 import type { FriendItem, PublicUser } from '../../types/nexora';
 import { GlassButton, GlassCard, GlassInput } from '../ui/LiquidGlass';
 import { FriendItemCard } from './FriendItemCard';
 
-type ContactFilter = 'all' | 'online' | 'streaks';
+type ContactFilter = 'all' | 'online';
 
 interface SearchableContactListProps {
   friends: FriendItem[];
@@ -25,48 +24,19 @@ export function SearchableContactList({
 }: SearchableContactListProps) {
   const [searchQuery, setSearchQuery] = useState('');
   const [filter, setFilter] = useState<ContactFilter>('all');
-  const [nowMs, setNowMs] = useState(() => Date.now());
   const { effectiveReducedMotion: prefersReducedMotion } = useVisualPrefs();
 
-  const hasTrackableStreaks = useMemo(
-    () =>
-      friends.some(
-        (f) => f.streak.isActive && f.streak.streakCount > 0 && Boolean(f.streak.expiresAt)
-      ),
-    [friends]
-  );
-
-  useEffect(() => {
-    setNowMs(Date.now());
-    if (!hasTrackableStreaks) return;
-    const timer = window.setInterval(() => {
-      setNowMs(Date.now());
-    }, 1000);
-    return () => window.clearInterval(timer);
-  }, [hasTrackableStreaks]);
-
-  const enrichedFriends = useMemo(
-    () => friends.map((f) => withFriendStreakCountdown(f, nowMs)),
-    [friends, nowMs]
-  );
-
   const onlineCount = useMemo(
-    () => enrichedFriends.filter((f) => f.user.isOnline).length,
-    [enrichedFriends]
-  );
-  const streakCount = useMemo(
-    () =>
-      enrichedFriends.filter((f) => f.streak.isActive && f.streak.streakCount > 0).length,
-    [enrichedFriends]
+    () => friends.filter((f) => f.user.isOnline).length,
+    [friends]
   );
 
   const filteredFriends = useMemo(() => {
     const rawQuery = searchQuery.trim().toLowerCase();
     const cleanQuery = rawQuery.startsWith('@') ? rawQuery.slice(1) : rawQuery;
 
-    const list = enrichedFriends.filter((f) => {
+    const list = friends.filter((f) => {
       if (filter === 'online' && !f.user.isOnline) return false;
-      if (filter === 'streaks' && (!f.streak.isActive || f.streak.streakCount <= 0)) return false;
 
       if (!cleanQuery) return true;
       const displayMatch = f.user.displayName.toLowerCase().includes(cleanQuery);
@@ -85,9 +55,9 @@ export function SearchableContactList({
         if (aExact !== bExact) return aExact ? -1 : 1;
       }
       if (a.user.isOnline !== b.user.isOnline) return a.user.isOnline ? -1 : 1;
-      return (b.streak.streakCount || 0) - (a.streak.streakCount || 0);
+      return a.user.displayName.localeCompare(b.user.displayName);
     });
-  }, [enrichedFriends, searchQuery, filter]);
+  }, [friends, searchQuery, filter]);
 
   if (friends.length === 0) {
     return (
@@ -95,7 +65,7 @@ export function SearchableContactList({
         <UserCheck className="w-8 h-8 text-violet-600 dark:text-violet-300 mx-auto opacity-85" />
         <div className="text-sm font-semibold text-[var(--nx-text-primary)]">No connections yet</div>
         <p className="text-xs text-[var(--nx-text-secondary)] max-w-sm mx-auto leading-relaxed">
-          Search for friends by their @username to start encrypted conversations, 24h stories, and friend streaks.
+          Search for friends by their @username to start encrypted conversations, 24h stories, and connection games.
         </p>
         <GlassButton type="button" variant="primary" size="sm" onClick={onSwitchToDiscover}>
           Find People
@@ -139,7 +109,6 @@ export function SearchableContactList({
           {([
             { id: 'all', label: `All (${friends.length})` },
             { id: 'online', label: `Online (${onlineCount})` },
-            { id: 'streaks', label: `Streaks (${streakCount})` },
           ] as const).map((item) => {
             const active = filter === item.id;
             return (
@@ -222,7 +191,6 @@ export function SearchableContactList({
                 <FriendItemCard
                   key={f.friendshipId}
                   friend={f}
-                  nowMs={nowMs}
                   prefersReducedMotion={prefersReducedMotion}
                   onStartChat={onStartChat}
                   onSelectProfile={onSelectProfile}

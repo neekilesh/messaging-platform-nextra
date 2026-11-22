@@ -7,6 +7,7 @@ import { db, isTransientSqlDisconnect } from './src/db/index.ts';
 import { createApiApp, runRetentionCleanup } from './server/app.ts';
 import { setupSocketServer } from './server/socket.ts';
 import { setupLiveVoiceWebSocket } from './server/live-ws.ts';
+import { startDailyChallengeScheduler } from './server/routes/connection-games.ts';
 
 function resolvePort(): number {
   const argIdx = process.argv.indexOf('--port');
@@ -45,6 +46,8 @@ async function startServer() {
       });
   }, 10_000);
   cleanupTimer.unref();
+
+  startDailyChallengeScheduler(db);
 
   const isProd = process.env.NODE_ENV === 'production';
   const distDir = path.resolve(process.cwd(), 'dist');

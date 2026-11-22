@@ -21,7 +21,9 @@ interface NotificationsPanelProps {
 
 function getActivityIcon(type: string) {
   if (type.includes('friend')) return <UserPlus className="w-4 h-4" />;
-  if (type.includes('streak')) return <Flame className="w-4 h-4 text-amber-500 dark:text-amber-300" />;
+  if (type.includes('connection_streak') || type.includes('deep_talk') || type.includes('daily_challenge')) {
+    return <Flame className="w-4 h-4 text-violet-500 dark:text-cyan-300" />;
+  }
   if (type.includes('story')) return <CircleDot className="w-4 h-4 text-sky-600 dark:text-sky-300" />;
   if (type.includes('group')) return <Users className="w-4 h-4 text-violet-600 dark:text-violet-300" />;
   if (type.includes('message')) return <MessageCircle className="w-4 h-4 text-indigo-600 dark:text-indigo-300" />;
@@ -43,7 +45,7 @@ export function NotificationsPanel({ notifications, onRefresh }: NotificationsPa
             Activity
           </h1>
           <p className="text-xs sm:text-sm text-[var(--nx-text-secondary)] mt-1">
-            Messages, friend requests, story interactions, group updates, and streak milestones.
+            Messages, friend requests, story interactions, group updates, and connection games.
           </p>
         </div>
         {notifications.some((n) => !n.isRead) && (
@@ -61,7 +63,7 @@ export function NotificationsPanel({ notifications, onRefresh }: NotificationsPa
           </div>
           <div className="text-sm font-semibold text-[var(--nx-text-primary)]">All caught up</div>
           <p className="text-xs text-[var(--nx-text-secondary)]">
-            New activity and streak updates will appear here in real time.
+            New activity and connection game updates will appear here in real time.
           </p>
         </GlassCard>
       ) : (

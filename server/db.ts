@@ -151,19 +151,6 @@ export function initializeSchema(db: DatabaseSync): void {
       created_at TEXT NOT NULL
     );
 
-    CREATE TABLE IF NOT EXISTS streaks (
-      id TEXT PRIMARY KEY,
-      user_a_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-      user_b_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-      streak_count INTEGER NOT NULL DEFAULT 0,
-      user_a_last_activity_at TEXT,
-      user_b_last_activity_at TEXT,
-      last_cycle_at TEXT,
-      expires_at TEXT,
-      updated_at TEXT NOT NULL,
-      UNIQUE(user_a_id, user_b_id)
-    );
-
     CREATE TABLE IF NOT EXISTS groups (
       id TEXT PRIMARY KEY,
       name TEXT NOT NULL,

@@ -23,11 +23,16 @@ import {
   ShieldBan,
   ShieldCheck,
   Smile,
+  Sparkles,
   Timer,
   Trash2,
   X,
 } from 'lucide-react';
 import { apiRequest, uploadEncryptedMedia } from '../../lib/api';
+import {
+  decryptDailyAssignment,
+  decryptDeepTalkSession,
+} from '../../lib/connection-games-crypto';
 import {
   decryptAndVerifyReadReceipt,
   decryptGroupMessage,
@@ -46,15 +51,18 @@ import { audioManager } from '../../audio/AudioManager';
 import { formatFullTimestamp, formatRelativeTimestamp } from '../../lib/time';
 import { useVisualPrefs } from '../../lib/theme';
 import type {
+  ConnectionGamesOverview,
   ConversationSummary,
+  DailyChallengeAssignment,
+  DailyConnectionStreak,
   DecryptedMessagePayload,
+  DeepTalkSession as DeepTalkSessionData,
   EncryptedMessageReaction,
   GroupDetails,
   MessageKind,
   MessageReactionItem,
   MessageRecord,
   SignedEncryptedReadReceipt,
-  StreakInfo,
 } from '../../types/nexora';
 import {
   GlassComposer,
@@ -73,12 +81,15 @@ import { SafetyNumberModal } from './SafetyNumberModal';
 import { ForwardModal } from './ForwardModal';
 import { VoiceRecorder } from './VoiceRecorder';
 import { GroupInfoDrawer } from '../group/GroupInfoDrawer';
-import { StreakCounter } from './StreakCounter';
+import { ConnectionGamesDrawer, type ConnectionGamesTab } from '../games/ConnectionGamesDrawer';
+import { DeepTalkSession } from '../games/DeepTalkSession';
 
 interface ChatWindowProps {
   conversation: ConversationSummary;
   allConversations: ConversationSummary[];
   currentUserId: string;
+  currentUserDisplayName?: string;
+  currentUserAvatar?: string | null;
   myKeys: StoredLocalKeyBundle;
   onBackMobile?: () => void;
   onConversationUpdated: () => void;
@@ -97,12 +108,12 @@ const DISAPPEARING_OPTIONS = [
   { label: '30 days', seconds: 2592000 },
 ];
 
-const STREAK_MILESTONE_DAYS = new Set([3, 7, 10, 14, 25, 30, 50, 100, 365]);
-
 export function ChatWindow({
   conversation,
   allConversations,
   currentUserId,
+  currentUserDisplayName = 'You',
+  currentUserAvatar = null,
   myKeys,
   onBackMobile,
   onConversationUpdated,
@@ -110,20 +121,6 @@ export function ChatWindow({
   const [messages, setMessages] = useState<MessageRecord[]>([]);
   const [liveArrivalIds, setLiveArrivalIds] = useState<Set<string>>(() => new Set());
   const { effectiveReducedMotion: prefersReducedMotion } = useVisualPrefs();
-  const [liveStreak, setLiveStreak] = useState<StreakInfo | null>(conversation.streak);
-  const streakTrackerRef = useRef<{
-    conversationId: string;
-    lastCount: number;
-    celebrated: Set<number>;
-  }>({
-    conversationId: conversation.id,
-    lastCount: conversation.streak?.isActive ? conversation.streak.streakCount : 0,
-    celebrated: new Set(
-      conversation.streak?.isActive && conversation.streak.streakCount > 0
-        ? [conversation.streak.streakCount]
-        : []
-    ),
-  });
   const [hasMore, setHasMore] = useState(false);
   const [loading, setLoading] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
@@ -148,6 +145,11 @@ export function ChatWindow({
   const [showTimerMenu, setShowTimerMenu] = useState(false);
   const [showSafetyModal, setShowSafetyModal] = useState(false);
   const [showGroupDrawer, setShowGroupDrawer] = useState(false);
+  const [showGamesDrawer, setShowGamesDrawer] = useState(false);
+  const [gamesTab, setGamesTab] = useState<ConnectionGamesTab>('deep-talk');
+  const [gamesOverview, setGamesOverview] = useState<ConnectionGamesOverview | null>(null);
+  const [gamesLoading, setGamesLoading] = useState(false);
+  const [dismissedBannerKey, setDismissedBannerKey] = useState<string | null>(null);
   const [showComposerEmoji, setShowComposerEmoji] = useState(false);
   const [lightbox, setLightbox] = useState<{ url: string; mimeType: string; fileName?: string | null } | null>(null);
   const [nowMs, setNowMs] = useState(() => Date.now());
@@ -429,47 +431,53 @@ export function ChatWindow({
     }
   };
 
-  const evaluateStreakMilestone = (nextStreak: StreakInfo | null | undefined) => {
-    if (nextStreak === undefined) return;
-    setLiveStreak(nextStreak);
-
-    if (!nextStreak || !nextStreak.isActive || nextStreak.streakCount <= 0) {
-      if (streakTrackerRef.current.conversationId === conversation.id) {
-        streakTrackerRef.current.lastCount = 0;
-      }
+  const loadConnectionGames = async () => {
+    if (conversation.type !== 'private' || !conversation.peerUser) {
+      setGamesOverview(null);
       return;
     }
+    setGamesLoading(true);
+    try {
+      const tz =
+        typeof Intl !== 'undefined'
+          ? Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'
+          : 'UTC';
+      const raw = await apiRequest<ConnectionGamesOverview>(
+        `/api/v1/connection-games/conversations/${conversation.id}?tz=${encodeURIComponent(tz)}`
+      );
 
-    const tracker = streakTrackerRef.current;
-    if (tracker.conversationId !== conversation.id) return;
+      const activeDeepTalkSession = raw.activeDeepTalkSession
+        ? await decryptDeepTalkSession(raw.activeDeepTalkSession, currentUserId, myKeys)
+        : null;
+      const pastDeepTalkSessions = await Promise.all(
+        (raw.pastDeepTalkSessions || []).map((s) =>
+          decryptDeepTalkSession(s, currentUserId, myKeys)
+        )
+      );
+      const todayChallenge = raw.todayChallenge
+        ? await decryptDailyAssignment(raw.todayChallenge, currentUserId, myKeys)
+        : null;
+      const challengeHistory = await Promise.all(
+        (raw.challengeHistory || []).map((c) =>
+          decryptDailyAssignment(c, currentUserId, myKeys)
+        )
+      );
 
-    const prevCount = tracker.lastCount;
-    const nextCount = nextStreak.streakCount;
-    const milestoneDay =
-      nextStreak.milestoneReached ?? (STREAK_MILESTONE_DAYS.has(nextCount) ? nextCount : null);
-
-    if (
-      milestoneDay &&
-      nextCount > prevCount &&
-      !tracker.celebrated.has(milestoneDay)
-    ) {
-      tracker.celebrated.add(milestoneDay);
-      audioManager.play('achievement.streak_milestone');
-    } else if (prevCount === 0 && nextCount > 0) {
-      audioManager.play('achievement.streak_started');
+      setGamesOverview({
+        ...raw,
+        activeDeepTalkSession,
+        pastDeepTalkSessions,
+        todayChallenge,
+        challengeHistory,
+      });
+    } catch {
+      // handled gracefully in drawer retry
+    } finally {
+      setGamesLoading(false);
     }
-
-    tracker.lastCount = nextCount;
   };
 
   useEffect(() => {
-    const initialCount = conversation.streak?.isActive ? conversation.streak.streakCount : 0;
-    streakTrackerRef.current = {
-      conversationId: conversation.id,
-      lastCount: initialCount,
-      celebrated: new Set(initialCount > 0 ? [initialCount] : []),
-    };
-    setLiveStreak(conversation.streak);
     setMessages([]);
     setLiveArrivalIds(new Set());
     sentReceiptIdsRef.current = new Set();
@@ -480,6 +488,9 @@ export function ChatWindow({
     setActiveMenuMsgId(null);
     setPressingMsgId(null);
     setShowGroupDrawer(false);
+    setShowGamesDrawer(false);
+    setGamesOverview(null);
+    setDismissedBannerKey(null);
     setShowComposerEmoji(false);
     setShowSearch(false);
     setSearchQuery('');
@@ -488,6 +499,9 @@ export function ChatWindow({
     const sock = getSocket();
     sock?.emit('conversation:join', conversation.id);
     loadMessages();
+    if (conversation.type === 'private' && conversation.peerUser) {
+      loadConnectionGames();
+    }
   }, [conversation.id]);
 
   useEffect(() => {
@@ -525,11 +539,6 @@ export function ChatWindow({
     };
   }, []);
 
-  useEffect(() => {
-    if (streakTrackerRef.current.conversationId !== conversation.id) return;
-    evaluateStreakMilestone(conversation.streak);
-  }, [conversation.id, conversation.streak]);
-
   // Live Socket.IO event wiring
   useEffect(() => {
     const sock = getSocket();
@@ -538,12 +547,8 @@ export function ChatWindow({
     const handleNewMessage = async (data: {
       conversationId: string;
       message: MessageRecord;
-      streak?: StreakInfo | null;
     }) => {
       if (data.conversationId !== conversation.id) return;
-      if (data.streak !== undefined) {
-        evaluateStreakMilestone(data.streak);
-      }
       if (conversation.type === 'group' && data.message.epoch && !epochKeysRef.current.has(data.message.epoch)) {
         await loadGroupEpochKeys();
       }
@@ -708,6 +713,74 @@ export function ChatWindow({
       loadGroupEpochKeys();
     };
 
+    const handleDeepTalkUpdated = async (data: {
+      conversationId: string;
+      session: DeepTalkSessionData;
+      event: string;
+      actorId: string;
+    }) => {
+      if (data.conversationId !== conversation.id) return;
+      const decrypted = await decryptDeepTalkSession(data.session, currentUserId, myKeys);
+      setGamesOverview((prev) => {
+        if (!prev) return prev;
+        const isLive =
+          decrypted.status === 'invited' ||
+          decrypted.status === 'active' ||
+          decrypted.status === 'paused';
+        if (isLive) {
+          return { ...prev, activeDeepTalkSession: decrypted };
+        }
+        return {
+          ...prev,
+          activeDeepTalkSession:
+            prev.activeDeepTalkSession?.id === decrypted.id ? null : prev.activeDeepTalkSession,
+          pastDeepTalkSessions: [
+            decrypted,
+            ...prev.pastDeepTalkSessions.filter((s) => s.id !== decrypted.id),
+          ].slice(0, 6),
+        };
+      });
+      if (data.actorId !== currentUserId) {
+        if (data.event === 'answers_revealed') {
+          audioManager.play('achievement.streak_milestone');
+        } else if (data.event === 'session_invited') {
+          audioManager.play('ui.glass_open');
+        }
+      }
+    };
+
+    const handleDailyChallengeUpdated = async (data: {
+      conversationId: string;
+      assignment: DailyChallengeAssignment | null;
+      connectionStreak: DailyConnectionStreak;
+      event: string;
+      actorId: string;
+    }) => {
+      if (data.conversationId !== conversation.id) return;
+      const decrypted = data.assignment
+        ? await decryptDailyAssignment(data.assignment, currentUserId, myKeys)
+        : null;
+      setGamesOverview((prev) =>
+        prev
+          ? {
+              ...prev,
+              todayChallenge: decrypted ?? prev.todayChallenge,
+              connectionStreak: data.connectionStreak ?? prev.connectionStreak,
+            }
+          : prev
+      );
+      if (data.actorId !== currentUserId && data.event === 'both_completed') {
+        audioManager.play('achievement.streak_milestone');
+      }
+    };
+
+    const handleSocketReconnect = () => {
+      sock.emit('conversation:join', conversation.id);
+      if (conversation.type === 'private' && conversation.peerUser) {
+        loadConnectionGames();
+      }
+    };
+
     sock.on('message:new', handleNewMessage);
     sock.on('message:edited', handleEdited);
     sock.on('message:updated', handleUpdated);
@@ -717,6 +790,9 @@ export function ChatWindow({
     sock.on('message:read_batch', handleReadBatch);
     sock.on('typing:update', handleTyping);
     sock.on('group:updated', handleGroupUpdated);
+    sock.on('connection_game:deep_talk_updated', handleDeepTalkUpdated);
+    sock.on('connection_game:daily_challenge_updated', handleDailyChallengeUpdated);
+    sock.on('connect', handleSocketReconnect);
 
     return () => {
       sock.off('message:new', handleNewMessage);
@@ -728,6 +804,9 @@ export function ChatWindow({
       sock.off('message:read_batch', handleReadBatch);
       sock.off('typing:update', handleTyping);
       sock.off('group:updated', handleGroupUpdated);
+      sock.off('connection_game:deep_talk_updated', handleDeepTalkUpdated);
+      sock.off('connection_game:daily_challenge_updated', handleDailyChallengeUpdated);
+      sock.off('connect', handleSocketReconnect);
     };
   }, [conversation.id, currentUserId]);
 
@@ -805,7 +884,7 @@ export function ChatWindow({
 
     try {
       const encrypted = await encryptPayloadForConversation(payload, msgId);
-      const res = await apiRequest<{ message: MessageRecord; streak?: StreakInfo | null }>(
+      const res = await apiRequest<{ message: MessageRecord }>(
         `/api/v1/conversations/${conversation.id}/messages`,
         {
           method: 'POST',
@@ -828,9 +907,6 @@ export function ChatWindow({
       setMessages((prev) => prev.map((m) => (m.id === msgId ? hydrated : m)));
       if (kind !== 'voice') {
         audioManager.play(conversation.type === 'group' ? 'group.send' : 'message.send');
-      }
-      if (res.streak !== undefined) {
-        evaluateStreakMilestone(res.streak);
       }
       if (!prefersReducedMotion) {
         setSendConfirmBurstKey(Date.now());
@@ -1262,6 +1338,65 @@ export function ChatWindow({
   const timerLabel =
     DISAPPEARING_OPTIONS.find((o) => o.seconds === conversation.disappearingSeconds)?.label || 'Off';
 
+  const hasGamesAttention = Boolean(
+    gamesOverview &&
+      ((gamesOverview.activeDeepTalkSession &&
+        (gamesOverview.activeDeepTalkSession.status === 'invited' ||
+          gamesOverview.activeDeepTalkSession.status === 'active')) ||
+        (gamesOverview.todayChallenge &&
+          gamesOverview.todayChallenge.lifecycleStatus === 'pending' &&
+          !gamesOverview.todayChallenge.myResponded))
+  );
+
+  const gamesBanner = useMemo(() => {
+    if (conversation.type !== 'private' || !conversation.peerUser || !gamesOverview) return null;
+    const dc = gamesOverview.todayChallenge;
+
+    if (dc && dc.lifecycleStatus === 'pending' && !dc.myResponded) {
+      return {
+        key: `dc-${dc.id}-${dc.userState}`,
+        tab: 'daily-challenge' as ConnectionGamesTab,
+        label:
+          dc.userState === 'waiting_for_you'
+            ? `${conversation.peerUser.displayName} completed today's challenge`
+            : "Today's Connection Challenge",
+        text: dc.challenge.promptText,
+        cta: 'Open',
+      };
+    }
+    return null;
+  }, [conversation.type, conversation.peerUser, gamesOverview]);
+
+  const handleInlineDeepTalkUpdated = (session: DeepTalkSessionData) => {
+    setGamesOverview((prev) => {
+      if (!prev) return prev;
+      const isLive =
+        session.status === 'invited' || session.status === 'active' || session.status === 'paused';
+      if (isLive) {
+        return { ...prev, activeDeepTalkSession: session };
+      }
+      const nextPast = [
+        session,
+        ...prev.pastDeepTalkSessions.filter((s) => s.id !== session.id),
+      ].slice(0, 6);
+      return {
+        ...prev,
+        activeDeepTalkSession:
+          prev.activeDeepTalkSession?.id === session.id ? null : prev.activeDeepTalkSession,
+        pastDeepTalkSessions: nextPast,
+      };
+    });
+  };
+
+  const handleDiscussInChat = (quoteText: string) => {
+    const formatted = `> ${quoteText}\n\n`;
+    setText((prev) => (prev.trim() ? `${prev.trimEnd()}\n\n${formatted}` : formatted));
+    if (typeof window !== 'undefined' && window.innerWidth < 768) {
+      setShowGamesDrawer(false);
+    }
+    setTimeout(() => composerInputRef.current?.focus(), 40);
+  };
+
   return (
     <motion.div
       key={conversation.id}
@@ -1297,7 +1432,6 @@ export function ChatWindow({
                 <h2 className="text-base font-display font-semibold text-[var(--nx-text-primary)] truncate">
                   {conversation.title}
                 </h2>
-                <StreakCounter streak={liveStreak} variant="header" />
               </div>
               <div className="text-xs text-[var(--nx-text-secondary)] truncate flex items-center gap-1.5">
                 {activeTyping ? (
@@ -1395,18 +1529,39 @@ export function ChatWindow({
             </div>
 
             {conversation.type === 'private' && conversation.peerUser && (
-              <button
-                type="button"
-                onClick={() => {
-                  audioManager.play('ui.glass_open');
-                  setShowSafetyModal(true);
-                }}
-                title="Verify encryption safety number"
-                aria-label="Verify encryption safety number"
-                className="min-h-[40px] min-w-[40px] rounded-xl text-[var(--nx-text-secondary)] hover:text-sky-600 dark:hover:text-cyan-300 hover:bg-[var(--nx-surface-hover)] flex items-center justify-center transition-colors cursor-pointer"
-              >
-                <ShieldCheck className="w-4 h-4" />
-              </button>
+              <>
+                <button
+                  type="button"
+                  onClick={() => {
+                    audioManager.play(showGamesDrawer ? 'ui.glass_close' : 'ui.glass_open');
+                    setShowGamesDrawer((v) => !v);
+                  }}
+                  title="Connection Games (Deep Talk Cards & Daily Challenge)"
+                  aria-label="Open Connection Games"
+                  className={`relative min-h-[40px] min-w-[40px] rounded-xl flex items-center justify-center transition-colors cursor-pointer ${
+                    showGamesDrawer
+                      ? 'bg-violet-500/22 text-violet-700 dark:text-cyan-300'
+                      : 'text-[var(--nx-text-secondary)] hover:text-violet-600 dark:hover:text-cyan-300 hover:bg-[var(--nx-surface-hover)]'
+                  }`}
+                >
+                  <Sparkles className="w-4 h-4" />
+                  {hasGamesAttention && !showGamesDrawer && (
+                    <span className="absolute top-1.5 right-1.5 w-2 h-2 rounded-full bg-cyan-400 shadow-[0_0_8px_rgba(34,211,238,0.8)]" />
+                  )}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    audioManager.play('ui.glass_open');
+                    setShowSafetyModal(true);
+                  }}
+                  title="Verify encryption safety number"
+                  aria-label="Verify encryption safety number"
+                  className="min-h-[40px] min-w-[40px] rounded-xl text-[var(--nx-text-secondary)] hover:text-sky-600 dark:hover:text-cyan-300 hover:bg-[var(--nx-surface-hover)] flex items-center justify-center transition-colors cursor-pointer"
+                >
+                  <ShieldCheck className="w-4 h-4" />
+                </button>
+              </>
             )}
 
             {conversation.type === 'group' && (
@@ -1522,6 +1677,80 @@ export function ChatWindow({
             <span className="text-[11px] font-mono-tabular text-[var(--nx-text-secondary)] shrink-0">
               {pinnedMessages.length} pinned
             </span>
+          </div>
+        )}
+
+        {/* Inline Deep Talk Cards Session */}
+        {!showGamesDrawer &&
+          conversation.type === 'private' &&
+          conversation.peerUser &&
+          gamesOverview?.activeDeepTalkSession && (
+            <div className="mx-3 sm:mx-4 mt-2 max-h-[52vh] overflow-y-auto shrink-0">
+              <DeepTalkSession
+                conversationId={conversation.id}
+                session={gamesOverview.activeDeepTalkSession}
+                currentUserId={currentUserId}
+                currentUserDisplayName={currentUserDisplayName}
+                currentUserAvatar={currentUserAvatar}
+                peerUser={conversation.peerUser}
+                myKeys={myKeys}
+                variant="inline"
+                onSessionUpdated={handleInlineDeepTalkUpdated}
+                onDiscussInChat={handleDiscussInChat}
+                onRefreshOverview={loadConnectionGames}
+                onOpenDrawer={() => {
+                  setGamesTab('deep-talk');
+                  setShowGamesDrawer(true);
+                }}
+              />
+            </div>
+          )}
+
+        {/* Active Daily Connection Challenge Banner */}
+        {gamesBanner && dismissedBannerKey !== gamesBanner.key && !showGamesDrawer && (
+          <div className="mx-3 sm:mx-4 mt-2 rounded-[18px] nexora-glass-subtle border border-violet-400/30 dark:border-cyan-400/25 px-3.5 py-2.5 flex items-center justify-between gap-3 shadow-[0_8px_22px_rgba(104,72,240,0.12)]">
+            <button
+              type="button"
+              onClick={() => {
+                audioManager.play('ui.glass_open');
+                setGamesTab(gamesBanner.tab);
+                setShowGamesDrawer(true);
+              }}
+              className="flex items-center gap-2.5 min-w-0 flex-1 text-left cursor-pointer"
+            >
+              <div className="w-8 h-8 rounded-xl bg-gradient-to-br from-violet-500/25 to-cyan-400/25 flex items-center justify-center shrink-0">
+                <Sparkles className="w-4 h-4 text-violet-600 dark:text-cyan-300" />
+              </div>
+              <div className="min-w-0">
+                <div className="text-[11px] font-semibold text-violet-700 dark:text-cyan-300 truncate">
+                  {gamesBanner.label}
+                </div>
+                <div className="text-xs text-[var(--nx-text-primary)] truncate">
+                  {gamesBanner.text}
+                </div>
+              </div>
+            </button>
+            <div className="flex items-center gap-1.5 shrink-0">
+              <button
+                type="button"
+                onClick={() => {
+                  audioManager.play('ui.glass_open');
+                  setGamesTab(gamesBanner.tab);
+                  setShowGamesDrawer(true);
+                }}
+                className="min-h-[34px] px-3 rounded-xl bg-gradient-to-br from-[#7c5cf6] to-[#566ee6] text-white text-xs font-medium cursor-pointer"
+              >
+                {gamesBanner.cta}
+              </button>
+              <button
+                type="button"
+                onClick={() => setDismissedBannerKey(gamesBanner.key)}
+                aria-label="Dismiss Connection Game notice"
+                className="p-1.5 rounded-lg text-[var(--nx-text-muted)] hover:text-[var(--nx-text-primary)] cursor-pointer"
+              >
+                <X className="w-3.5 h-3.5" />
+              </button>
+            </div>
           </div>
         )}
 
@@ -2242,6 +2471,24 @@ export function ChatWindow({
           </form>
         </footer>
       </div>
+
+      {showGamesDrawer && conversation.type === 'private' && conversation.peerUser && (
+        <ConnectionGamesDrawer
+          conversationId={conversation.id}
+          currentUserId={currentUserId}
+          currentUserDisplayName={currentUserDisplayName}
+          currentUserAvatar={currentUserAvatar}
+          peerUser={conversation.peerUser}
+          myKeys={myKeys}
+          overview={gamesOverview}
+          loading={gamesLoading}
+          initialTab={gamesTab}
+          onOverviewChange={setGamesOverview}
+          onRefreshOverview={loadConnectionGames}
+          onDiscussInChat={handleDiscussInChat}
+          onClose={() => setShowGamesDrawer(false)}
+        />
+      )}
 
       {showGroupDrawer && conversation.type === 'group' && conversation.groupId && (
         <GroupInfoDrawer

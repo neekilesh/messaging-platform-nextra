@@ -163,46 +163,43 @@ export function AuthFlow({ onAuthenticated }: AuthFlowProps) {
 
   const handleAccessKeyLogin = async (e: React.FormEvent) => {
     e.preventDefault();
+    const key = accessKeyInput.trim();
+    if (!key) {
+      setError('Please paste your Access Key.');
+      return;
+    }
     setError(null);
     setKeyLoading(true);
     try {
-      const cleanKey = accessKeyInput.trim();
+      const rawKeys = await generateIdentityKeyPair();
       const res = await apiRequest<{
         sessionToken: string;
         user: AuthUser;
       }>('/api/v1/auth/access-key', {
         method: 'POST',
         body: JSON.stringify({
-          accessKey: cleanKey,
           ...deviceMeta(),
+          accessKey: key,
+          keys: {
+            ecdhPublicJwk: JSON.stringify(rawKeys.ecdhPublicJwk),
+            ecdsaPublicJwk: JSON.stringify(rawKeys.ecdsaPublicJwk),
+            fingerprint: rawKeys.fingerprint,
+          },
         }),
       });
 
       setStoredToken(res.sessionToken);
-      try {
-        localStorage.setItem(`nexora_access_key_${res.user.id}`, cleanKey);
-      } catch {
-        // ignore
-      }
-
-      let bundle = await loadLocalKeyBundle(res.user.id);
-      if (!bundle) {
-        const fresh = await generateIdentityKeyPair();
-        bundle = { userId: res.user.id, ...fresh };
+      const existingLocal = await loadLocalKeyBundle(res.user.id);
+      const bundle: StoredLocalKeyBundle = existingLocal || {
+        userId: res.user.id,
+        ...rawKeys,
+      };
+      if (!existingLocal) {
         await saveLocalKeyBundle(bundle);
-        await apiRequest('/api/v1/users/me/keys', {
-          method: 'POST',
-          body: JSON.stringify({
-            ecdhPublicJwk: JSON.stringify(fresh.ecdhPublicJwk),
-            ecdsaPublicJwk: JSON.stringify(fresh.ecdsaPublicJwk),
-            fingerprint: fresh.fingerprint,
-          }),
-        });
       }
-
       onAuthenticated(res.user, bundle);
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Access Key sign-in failed.');
+      setError(err instanceof Error ? err.message : 'Invalid Access Key.');
     } finally {
       setKeyLoading(false);
     }
@@ -211,84 +208,67 @@ export function AuthFlow({ onAuthenticated }: AuthFlowProps) {
   const busy = googleLoading || instantLoading || keyLoading;
 
   return (
-    <div className="min-h-screen w-full nexora-cosmos flex items-center justify-center p-4 sm:p-8 relative overflow-hidden">
+    <div className="min-h-screen w-full nexora-cosmos flex flex-col items-center justify-center p-4 relative overflow-hidden">
       <CosmicBackdrop />
+      <div className="absolute top-4 right-4 z-20">
+        <PWAInstallButton />
+      </div>
 
       <AnimatePresence mode="wait">
         {screen === 'splash' && (
           <motion.div
             key="splash"
-            initial={{ opacity: 0, scale: 0.94 }}
+            initial={{ opacity: 0, scale: 0.9 }}
             animate={{ opacity: 1, scale: 1 }}
-            exit={{ opacity: 0, scale: 1.03 }}
+            exit={{ opacity: 0, scale: 1.05 }}
             transition={{ duration: 0.4, ease: [0.16, 1, 0.3, 1] }}
-            className="relative z-10 flex flex-col items-center text-center gap-5"
+            className="relative z-10 flex flex-col items-center gap-4 text-center"
           >
-            <NexoraLogo size={76} />
-            <div>
-              <h1 className="text-3xl sm:text-4xl font-display font-bold tracking-tight text-[var(--nx-text-primary)]">
-                NEXORA
-              </h1>
-              <p className="text-sm text-[var(--nx-text-secondary)] mt-1.5">
-                Zero-form entry. End-to-end encrypted messaging.
-              </p>
-            </div>
+            <NexoraLogo size={72} />
+            <h1 className="text-3xl font-display font-bold text-[var(--nx-text-primary)] tracking-tight">
+              NEXORA
+            </h1>
+            <p className="text-xs text-[var(--nx-text-secondary)] font-mono tracking-widest uppercase">
+              Quantum-Resistant Private Communications
+            </p>
           </motion.div>
         )}
 
         {screen === 'welcome' && (
           <motion.div
             key="welcome"
-            initial={{ opacity: 0, y: 14 }}
+            initial={{ opacity: 0, y: 16 }}
             animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0, y: -10 }}
-            transition={{ duration: 0.28, ease: [0.16, 1, 0.3, 1] }}
-            className="relative z-10 w-full max-w-4xl grid grid-cols-1 lg:grid-cols-2 gap-8 items-center"
+            exit={{ opacity: 0, y: -16 }}
+            transition={{ duration: 0.3, ease: [0.16, 1, 0.3, 1] }}
+            className="relative z-10 w-full max-w-md"
           >
-            <div className="space-y-6">
-              <div className="flex items-center gap-3">
-                <NexoraLogo size={42} />
-                <span className="text-2xl font-display font-bold tracking-tight text-[var(--nx-text-primary)]">
-                  NEXORA
-                </span>
-              </div>
-              <h1 className="text-3xl sm:text-5xl font-display font-bold tracking-tight text-[var(--nx-text-primary)] leading-[1.08]">
-                Private connections, effortless clarity.
-              </h1>
-              <p className="text-base text-[var(--nx-text-secondary)] leading-relaxed max-w-md">
-                Enter immediately with Google or a one-click Instant Device Pass. Your @handle and ECDH P-256 device keys are provisioned automatically.
-              </p>
-              <div className="flex flex-wrap items-center gap-2 text-xs text-[var(--nx-text-muted)]">
-                <span>1-click Google Sign-In</span>
-                <span aria-hidden="true">·</span>
-                <span>Instant Device Pass</span>
-                <span aria-hidden="true">·</span>
-                <span>25-member encrypted groups</span>
-              </div>
-              <PWAInstallButton />
-            </div>
-
-            <GlassCard intensity="elevated" padding="lg" className="space-y-5 rounded-[28px] sm:p-8">
-              <div className="relative z-10 space-y-1.5">
-                <h2 className="text-xl font-display font-semibold text-[var(--nx-text-primary)]">
-                  Enter NEXORA
+            <GlassCard intensity="elevated" padding="lg" className="space-y-6 rounded-[32px] sm:p-8">
+              <div className="relative z-10 text-center space-y-2">
+                <div className="inline-flex items-center justify-center mb-1">
+                  <NexoraLogo size={52} />
+                </div>
+                <h2 className="text-2xl sm:text-3xl font-display font-bold text-[var(--nx-text-primary)] tracking-tight">
+                  Welcome to NEXORA
                 </h2>
-                <p className="text-sm text-[var(--nx-text-secondary)]">
-                  Choose Google or start an Instant Device Pass right away. You can customize your @handle anytime inside Profile.
+                <p className="text-xs sm:text-sm text-[var(--nx-text-secondary)] leading-relaxed">
+                  Secure end-to-end encrypted messaging, 24-hour stories, live maps, and meaningful connection games.
                 </p>
               </div>
 
               {error && (
-                <div className="relative z-10 rounded-[18px] bg-rose-500/12 border border-rose-500/35 dark:border-rose-400/30 px-4 py-3 text-sm text-rose-700 dark:text-rose-200 space-y-2">
-                  <p>{error}</p>
-                  {unauthorizedHost && (
-                    <div className="rounded-[14px] bg-white/60 dark:bg-black/45 border border-rose-500/25 dark:border-rose-400/20 px-3 py-2 text-xs text-[var(--nx-text-secondary)] space-y-1">
-                      <div className="font-medium text-rose-700 dark:text-rose-200">Domain to authorize:</div>
-                      <code className="block break-all font-mono-tabular text-sky-700 dark:text-sky-300 select-all">
-                        {unauthorizedHost}
-                      </code>
-                    </div>
-                  )}
+                <div className="relative z-10 rounded-[18px] bg-rose-500/12 border border-rose-500/35 dark:border-rose-400/30 px-4 py-3 text-xs text-rose-700 dark:text-rose-200 leading-relaxed">
+                  {error}
+                </div>
+              )}
+
+              {unauthorizedHost && (
+                <div className="relative z-10 rounded-[18px] bg-amber-500/12 border border-amber-500/35 dark:border-amber-400/30 px-4 py-3 text-xs text-amber-800 dark:text-amber-200 leading-relaxed space-y-2">
+                  <div className="font-semibold">Firebase Authorized Domain Required</div>
+                  <div className="font-mono text-[11px] bg-black/20 p-1.5 rounded">{unauthorizedHost}</div>
+                  <p className="text-[11px]">
+                    To enable Google sign-in on this exact preview URL, add <span className="font-mono font-medium">{unauthorizedHost}</span> in your Firebase Console under <span className="underline">Authentication → Settings → Authorized domains</span>. Alternatively, use <span className="font-semibold text-white">Instant Device Pass</span> below for immediate access without domain config.
+                  </p>
                 </div>
               )}
 
@@ -311,7 +291,7 @@ export function AuthFlow({ onAuthenticated }: AuthFlowProps) {
                   onClick={handleInstantPass}
                   className="w-full"
                 >
-                  <Zap className="w-4 h-4 text-sky-200" />
+                  <Zap className="w-4 h-4 text-amber-300" />
                   <span>{instantLoading ? 'Activating Instant Pass...' : 'Enter with Instant Device Pass'}</span>
                 </GlassButton>
 
@@ -355,6 +335,8 @@ export function AuthFlow({ onAuthenticated }: AuthFlowProps) {
             </GlassCard>
           </motion.div>
         )}
+
+
 
         {screen === 'access_key' && (
           <motion.div

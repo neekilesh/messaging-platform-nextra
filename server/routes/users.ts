@@ -12,6 +12,7 @@ import {
 import { createRequireAuth, getPublicUserById, isBlockedBetween } from '../context.ts';
 import type { AuthedRequest } from '../context.ts';
 import { validateUsernameFormat } from '../security.ts';
+import { isValidIanaTimezone } from '../connection-games-seed.ts';
 
 export function createUsersRouter(database: PgDatabase) {
   const router = Router();
@@ -77,6 +78,9 @@ export function createUsersRouter(database: PgDatabase) {
           storyDefaultVisibility:
             row?.storyDefaultVisibility === 'close_friends' ? 'close_friends' : 'friends',
           allowDiscoveryByUsername: row ? row.allowDiscoveryByUsername === 1 : true,
+          allowConnectionGameNotifications: row
+            ? row.allowConnectionGameNotifications === 1
+            : true,
         },
       });
     } catch (error) {
@@ -95,6 +99,8 @@ export function createUsersRouter(database: PgDatabase) {
       const storyDefaultVisibility =
         body.storyDefaultVisibility === 'close_friends' ? 'close_friends' : 'friends';
       const allowDiscoveryByUsername = body.allowDiscoveryByUsername === false ? 0 : 1;
+      const allowConnectionGameNotifications =
+        body.allowConnectionGameNotifications === false ? 0 : 1;
 
       await database
         .insert(privacySettings)
@@ -105,6 +111,7 @@ export function createUsersRouter(database: PgDatabase) {
           allowChatRequests,
           storyDefaultVisibility,
           allowDiscoveryByUsername,
+          allowConnectionGameNotifications,
           updatedAt: nowIso,
         })
         .onConflictDoUpdate({
@@ -115,6 +122,7 @@ export function createUsersRouter(database: PgDatabase) {
             allowChatRequests,
             storyDefaultVisibility,
             allowDiscoveryByUsername,
+            allowConnectionGameNotifications,
             updatedAt: nowIso,
           },
         });
@@ -126,6 +134,7 @@ export function createUsersRouter(database: PgDatabase) {
           allowChatRequests: allowChatRequests === 1,
           storyDefaultVisibility,
           allowDiscoveryByUsername: allowDiscoveryByUsername === 1,
+          allowConnectionGameNotifications: allowConnectionGameNotifications === 1,
         },
       });
     } catch (error) {
@@ -172,6 +181,7 @@ export function createUsersRouter(database: PgDatabase) {
           statusText: users.statusText,
           avatarUrl: users.avatarUrl,
           usernameChangedAt: users.usernameChangedAt,
+          timezone: users.timezone,
         })
         .from(users)
         .where(eq(users.id, req.userId!))
@@ -233,6 +243,18 @@ export function createUsersRouter(database: PgDatabase) {
             : null
           : current.avatarUrl;
 
+      let nextTimezone = current.timezone;
+      if (body.timezone !== undefined) {
+        if (typeof body.timezone !== 'string') {
+          return res.status(400).json({ error: 'A valid IANA timezone identifier is required.' });
+        }
+        const validTz = isValidIanaTimezone(body.timezone);
+        if (!validTz) {
+          return res.status(400).json({ error: 'A valid IANA timezone identifier is required.' });
+        }
+        nextTimezone = validTz;
+      }
+
       await database
         .update(users)
         .set({
@@ -242,6 +264,7 @@ export function createUsersRouter(database: PgDatabase) {
           bio,
           statusText,
           avatarUrl,
+          timezone: nextTimezone,
           usernameChangedAt: nextChangedAt,
           updatedAt: nowIso,
         })

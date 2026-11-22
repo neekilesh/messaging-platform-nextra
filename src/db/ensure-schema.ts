@@ -7,6 +7,51 @@ export function ensureDatabaseSchema(database: PgDatabase): Promise<boolean> {
   if (!schemaReadyPromise) {
     schemaReadyPromise = (async () => {
       try {
+        const colCheck = await database.execute(sql`
+          SELECT table_name, column_name
+          FROM information_schema.columns
+          WHERE table_schema = 'public'
+            AND table_name IN (
+              'users',
+              'privacy_settings',
+              'deep_talk_questions',
+              'deep_talk_sessions',
+              'deep_talk_answers',
+              'daily_challenges',
+              'daily_challenge_assignments',
+              'daily_challenge_responses',
+              'daily_connection_streaks'
+            )
+        `);
+        const rows = (colCheck.rows || []) as unknown as Array<{
+          table_name: string;
+          column_name: string;
+        }>;
+        const tablesPresent = new Set(rows.map((r) => r.table_name));
+        const hasGamesCol = rows.some(
+          (r) =>
+            r.table_name === 'privacy_settings' &&
+            r.column_name === 'allow_connection_game_notifications'
+        );
+        const hasUserTzCol = rows.some(
+          (r) => r.table_name === 'users' && r.column_name === 'timezone'
+        );
+        if (
+          tablesPresent.has('users') &&
+          hasUserTzCol &&
+          tablesPresent.has('privacy_settings') &&
+          hasGamesCol &&
+          tablesPresent.has('deep_talk_questions') &&
+          tablesPresent.has('deep_talk_sessions') &&
+          tablesPresent.has('deep_talk_answers') &&
+          tablesPresent.has('daily_challenges') &&
+          tablesPresent.has('daily_challenge_assignments') &&
+          tablesPresent.has('daily_challenge_responses') &&
+          tablesPresent.has('daily_connection_streaks')
+        ) {
+          return true;
+        }
+
         await database.execute(sql`
           CREATE TABLE IF NOT EXISTS users (
             id text PRIMARY KEY,
@@ -22,9 +67,11 @@ export function ensureDatabaseSchema(database: PgDatabase): Promise<boolean> {
             status_text text NOT NULL DEFAULT 'Encrypted on NEXORA',
             last_seen_at text,
             username_changed_at text,
+            timezone text NOT NULL DEFAULT 'UTC',
             created_at text NOT NULL,
             updated_at text NOT NULL
           );
+          ALTER TABLE users ADD COLUMN IF NOT EXISTS timezone text NOT NULL DEFAULT 'UTC';
           CREATE INDEX IF NOT EXISTS idx_users_username_norm ON users (username_normalized);
 
           CREATE TABLE IF NOT EXISTS email_verifications (
@@ -97,6 +144,7 @@ export function ensureDatabaseSchema(database: PgDatabase): Promise<boolean> {
             allow_chat_requests integer NOT NULL DEFAULT 1,
             story_default_visibility text NOT NULL DEFAULT 'friends',
             allow_discovery_by_username integer NOT NULL DEFAULT 1,
+            allow_connection_game_notifications integer NOT NULL DEFAULT 1,
             updated_at text NOT NULL
           );
 
@@ -134,19 +182,6 @@ export function ensureDatabaseSchema(database: PgDatabase): Promise<boolean> {
             details text NOT NULL DEFAULT '',
             created_at text NOT NULL
           );
-
-          CREATE TABLE IF NOT EXISTS streaks (
-            id text PRIMARY KEY,
-            user_a_id text NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-            user_b_id text NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-            streak_count integer NOT NULL DEFAULT 0,
-            user_a_last_activity_at text,
-            user_b_last_activity_at text,
-            last_cycle_at text,
-            expires_at text,
-            updated_at text NOT NULL
-          );
-          CREATE UNIQUE INDEX IF NOT EXISTS idx_streaks_pair ON streaks (user_a_id, user_b_id);
 
           CREATE TABLE IF NOT EXISTS groups (
             id text PRIMARY KEY,
@@ -365,6 +400,118 @@ export function ensureDatabaseSchema(database: PgDatabase): Promise<boolean> {
             created_at text NOT NULL
           );
           CREATE INDEX IF NOT EXISTS idx_game_scores_score ON game_scores (score);
+
+          CREATE TABLE IF NOT EXISTS deep_talk_questions (
+            id text PRIMARY KEY,
+            category_id text NOT NULL,
+            category_name text NOT NULL,
+            question_text text NOT NULL,
+            sort_order integer NOT NULL DEFAULT 0,
+            is_active integer NOT NULL DEFAULT 1,
+            created_by_user_id text REFERENCES users(id) ON DELETE SET NULL,
+            created_at text NOT NULL
+          );
+          CREATE INDEX IF NOT EXISTS idx_deep_talk_q_cat ON deep_talk_questions (category_id, is_active);
+
+          CREATE TABLE IF NOT EXISTS deep_talk_sessions (
+            id text PRIMARY KEY,
+            conversation_id text NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+            initiator_id text NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            peer_id text NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            category_id text NOT NULL,
+            category_name text NOT NULL,
+            question_limit integer,
+            status text NOT NULL DEFAULT 'invited',
+            question_ids_json text NOT NULL DEFAULT '[]',
+            current_question_index integer NOT NULL DEFAULT 0,
+            current_question_id text,
+            ready_user_ids_json text NOT NULL DEFAULT '[]',
+            skipped_question_ids_json text NOT NULL DEFAULT '[]',
+            revealed_question_ids_json text NOT NULL DEFAULT '[]',
+            paused_by_user_id text,
+            ended_by_user_id text,
+            last_activity_at text NOT NULL,
+            created_at text NOT NULL,
+            updated_at text NOT NULL
+          );
+          CREATE INDEX IF NOT EXISTS idx_deep_talk_sessions_conv ON deep_talk_sessions (conversation_id, updated_at);
+          CREATE INDEX IF NOT EXISTS idx_deep_talk_sessions_status ON deep_talk_sessions (conversation_id, status);
+
+          CREATE TABLE IF NOT EXISTS deep_talk_answers (
+            id text PRIMARY KEY,
+            session_id text NOT NULL REFERENCES deep_talk_sessions(id) ON DELETE CASCADE,
+            conversation_id text NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+            question_id text NOT NULL REFERENCES deep_talk_questions(id) ON DELETE CASCADE,
+            question_index integer NOT NULL,
+            user_id text NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            ciphertext text NOT NULL,
+            iv text NOT NULL,
+            aad text NOT NULL,
+            recipient_envelopes_json text NOT NULL,
+            reactions_json text NOT NULL DEFAULT '[]',
+            reply_message_id text,
+            submitted_at text NOT NULL
+          );
+          CREATE UNIQUE INDEX IF NOT EXISTS idx_deep_talk_answers_unique ON deep_talk_answers (session_id, question_id, user_id);
+          CREATE INDEX IF NOT EXISTS idx_deep_talk_answers_session ON deep_talk_answers (session_id, question_index);
+          CREATE INDEX IF NOT EXISTS idx_deep_talk_answers_conv ON deep_talk_answers (conversation_id, submitted_at);
+
+          CREATE TABLE IF NOT EXISTS daily_challenges (
+            id text PRIMARY KEY,
+            category_id text NOT NULL,
+            category_name text NOT NULL,
+            prompt_text text NOT NULL,
+            symbol_key text NOT NULL DEFAULT 'sparkles',
+            is_active integer NOT NULL DEFAULT 1,
+            created_at text NOT NULL
+          );
+          CREATE INDEX IF NOT EXISTS idx_daily_challenges_active ON daily_challenges (is_active, category_id);
+
+          CREATE TABLE IF NOT EXISTS daily_challenge_assignments (
+            id text PRIMARY KEY,
+            conversation_id text NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+            private_pair_key text NOT NULL,
+            challenge_id text NOT NULL REFERENCES daily_challenges(id) ON DELETE CASCADE,
+            challenge_date text NOT NULL,
+            timezone text NOT NULL DEFAULT 'UTC',
+            lifecycle_status text NOT NULL DEFAULT 'pending',
+            expires_at text NOT NULL,
+            completed_at text,
+            skipped_by_user_id text,
+            created_at text NOT NULL,
+            updated_at text NOT NULL
+          );
+          CREATE UNIQUE INDEX IF NOT EXISTS idx_daily_challenge_conv_day ON daily_challenge_assignments (conversation_id, challenge_date);
+          CREATE INDEX IF NOT EXISTS idx_daily_challenge_conv_updated ON daily_challenge_assignments (conversation_id, challenge_date);
+
+          CREATE TABLE IF NOT EXISTS daily_challenge_responses (
+            id text PRIMARY KEY,
+            assignment_id text NOT NULL REFERENCES daily_challenge_assignments(id) ON DELETE CASCADE,
+            conversation_id text NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+            user_id text NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            ciphertext text NOT NULL,
+            iv text NOT NULL,
+            aad text NOT NULL,
+            recipient_envelopes_json text NOT NULL,
+            reactions_json text NOT NULL DEFAULT '[]',
+            reply_message_id text,
+            submitted_at text NOT NULL
+          );
+          CREATE UNIQUE INDEX IF NOT EXISTS idx_daily_challenge_resp_unique ON daily_challenge_responses (assignment_id, user_id);
+
+          CREATE TABLE IF NOT EXISTS daily_connection_streaks (
+            id text PRIMARY KEY,
+            conversation_id text NOT NULL UNIQUE REFERENCES conversations(id) ON DELETE CASCADE,
+            user_a_id text NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            user_b_id text NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            current_streak integer NOT NULL DEFAULT 0,
+            longest_streak integer NOT NULL DEFAULT 0,
+            total_completed integer NOT NULL DEFAULT 0,
+            last_completed_date text,
+            last_celebrated_milestone integer NOT NULL DEFAULT 0,
+            updated_at text NOT NULL
+          );
+          CREATE UNIQUE INDEX IF NOT EXISTS idx_daily_conn_streak_pair ON daily_connection_streaks (user_a_id, user_b_id);
         `);
         return true;
       } catch (err) {

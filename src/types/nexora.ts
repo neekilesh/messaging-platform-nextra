@@ -68,6 +68,7 @@ export interface PrivacySettings {
   allowChatRequests: boolean;
   storyDefaultVisibility: StoryVisibility;
   allowDiscoveryByUsername: boolean;
+  allowConnectionGameNotifications?: boolean;
 }
 
 export interface DeviceSession {
@@ -163,14 +164,6 @@ export interface MessageRecord {
   localStatus?: MessageStatus;
 }
 
-export interface StreakInfo {
-  streakCount: number;
-  expiresAt: string | null;
-  expiringSoon: boolean;
-  isActive: boolean;
-  milestoneReached: number | null;
-}
-
 export interface GroupMemberInfo {
   userId: string;
   username: string;
@@ -224,25 +217,14 @@ export interface ConversationSummary {
   muted: boolean;
   archived: boolean;
   unreadCount: number;
-  streak: StreakInfo | null;
   lastMessage: MessageRecord | null;
   lastMessageAt: string | null;
   myEpochEnvelopes?: GroupEpochEnvelope[];
 }
 
-export interface FriendStreakCountdown {
-  isActive: boolean;
-  isExpiring: boolean;
-  remainingMs: number | null;
-  formattedCountdown: string | null;
-}
-
 export interface FriendItem {
   friendshipId: string;
   user: PublicUser;
-  streak: StreakInfo;
-  streakExpiringCountdown?: string | null;
-  streakRemainingMs?: number | null;
   conversationId: string | null;
   createdAt: string;
 }
@@ -299,4 +281,136 @@ export interface NotificationItem {
   body: string;
   isRead: boolean;
   createdAt: string;
+}
+
+export interface DeepTalkCategory {
+  id: string;
+  name: string;
+  questionCount: number;
+}
+
+export interface DeepTalkQuestion {
+  id: string;
+  categoryId: string;
+  categoryName: string;
+  questionText: string;
+  sortOrder: number;
+}
+
+export interface ConnectionGameReaction {
+  userId: string;
+  emoji: string;
+  createdAt: string;
+}
+
+export interface EncryptedConnectionAnswer {
+  id: string;
+  userId: string;
+  ciphertext: string;
+  iv: string;
+  aad: string;
+  recipientEnvelopes: Record<string, RecipientEnvelope>;
+  reactions: ConnectionGameReaction[];
+  replyMessageId: string | null;
+  submittedAt: string;
+  localText?: string;
+}
+
+export type DeepTalkSessionStatus =
+  | 'invited'
+  | 'active'
+  | 'paused'
+  | 'declined'
+  | 'ended'
+  | 'completed';
+
+export interface DeepTalkQuestionState {
+  questionIndex: number;
+  question: DeepTalkQuestion;
+  myAnswered: boolean;
+  peerAnswered: boolean;
+  bothAnswered: boolean;
+  revealed: boolean;
+  skipped: boolean;
+  answers: EncryptedConnectionAnswer[];
+}
+
+export interface DeepTalkSession {
+  id: string;
+  conversationId: string;
+  initiatorId: string;
+  peerId: string;
+  categoryId: string;
+  categoryName: string;
+  questionLimit: number | null;
+  status: DeepTalkSessionStatus;
+  currentQuestionIndex: number;
+  totalLoadedQuestions: number;
+  readyUserIds: string[];
+  skippedQuestionIds: string[];
+  revealedQuestionIds: string[];
+  pausedByUserId: string | null;
+  endedByUserId: string | null;
+  currentCard: DeepTalkQuestionState | null;
+  revealedHistory: DeepTalkQuestionState[];
+  lastActivityAt: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export type DailyChallengeUserState =
+  | 'new_challenge'
+  | 'waiting_for_you'
+  | 'waiting_for_friend'
+  | 'both_completed'
+  | 'skipped'
+  | 'missed'
+  | 'expired';
+
+export interface DailyChallengePrompt {
+  id: string;
+  categoryId: string;
+  categoryName: string;
+  promptText: string;
+  symbolKey: string;
+}
+
+export interface DailyChallengeAssignment {
+  id: string;
+  conversationId: string;
+  challengeDate: string;
+  timezone: string;
+  lifecycleStatus: 'pending' | 'both_completed' | 'skipped' | 'expired';
+  userState: DailyChallengeUserState;
+  expiresAt: string;
+  completedAt: string | null;
+  skippedByUserId: string | null;
+  challenge: DailyChallengePrompt;
+  myResponded: boolean;
+  peerResponded: boolean;
+  revealed: boolean;
+  responses: EncryptedConnectionAnswer[];
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface DailyConnectionStreak {
+  currentStreak: number;
+  longestStreak: number;
+  totalCompleted: number;
+  lastCompletedDate: string | null;
+  milestoneReached: number | null;
+  nextMilestone: number | null;
+}
+
+export interface ConnectionGamesOverview {
+  conversationId: string;
+  timezone: string;
+  todayDate: string;
+  categories: DeepTalkCategory[];
+  activeDeepTalkSession: DeepTalkSession | null;
+  pastDeepTalkSessions: DeepTalkSession[];
+  todayChallenge: DailyChallengeAssignment | null;
+  challengeHistory: DailyChallengeAssignment[];
+  connectionStreak: DailyConnectionStreak;
 }

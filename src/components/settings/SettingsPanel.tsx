@@ -6,7 +6,6 @@ import {
   ChevronDown,
   Copy,
   Flame,
-  Gamepad2,
   KeyRound,
   Laptop,
   Lock,
@@ -62,8 +61,7 @@ interface SettingsPanelProps {
   user: AuthUser;
   myKeys: StoredLocalKeyBundle;
   friendsCount?: number;
-  activeStreaksCount?: number;
-  onOpenExplore?: (target: 'ai' | 'maps' | 'arena3d') => void;
+  onOpenExplore?: (target: 'ai' | 'maps') => void;
   onUserUpdated: (user: AuthUser) => void;
   onLogout: () => void;
 }
@@ -141,7 +139,6 @@ export function SettingsPanel({
   user,
   myKeys,
   friendsCount = 0,
-  activeStreaksCount = 0,
   onOpenExplore,
   onUserUpdated,
   onLogout,
@@ -171,6 +168,7 @@ export function SettingsPanel({
     allowChatRequests: true,
     storyDefaultVisibility: 'friends',
     allowDiscoveryByUsername: true,
+    allowConnectionGameNotifications: true,
   });
 
   const [blocked, setBlocked] = useState<Array<{ user: PublicUser; blockedAt: string }>>([]);
@@ -380,20 +378,13 @@ export function SettingsPanel({
               </div>
             </div>
 
-            <div className="grid grid-cols-3 gap-4 sm:gap-6 pt-3 sm:pt-0 border-t sm:border-t-0 border-[var(--nx-border)] shrink-0">
+            <div className="grid grid-cols-2 gap-4 sm:gap-6 pt-3 sm:pt-0 border-t sm:border-t-0 border-[var(--nx-border)] shrink-0">
               <div>
                 <div className="text-lg font-display font-bold text-[var(--nx-text-primary)] font-mono-tabular tabular-nums flex items-center gap-1.5">
                   <Users className="w-4 h-4 text-violet-600 dark:text-violet-300 shrink-0" />
                   <span>{friendsCount}</span>
                 </div>
                 <div className="text-[11px] text-[var(--nx-text-secondary)]">Friends</div>
-              </div>
-              <div>
-                <div className="text-lg font-display font-bold text-[var(--nx-text-primary)] font-mono-tabular tabular-nums flex items-center gap-1.5">
-                  <Flame className="w-4 h-4 text-amber-600 dark:text-amber-300 shrink-0" />
-                  <span>{activeStreaksCount}</span>
-                </div>
-                <div className="text-[11px] text-[var(--nx-text-secondary)]">Active Streaks</div>
               </div>
               <div>
                 <div className="text-sm font-mono-tabular tabular-nums font-semibold text-sky-700 dark:text-sky-300 flex items-center gap-1.5 pt-0.5">
@@ -428,16 +419,6 @@ export function SettingsPanel({
                 >
                   <MapPin className="w-3.5 h-3.5 text-sky-600 dark:text-sky-300" />
                   <span>Maps</span>
-                </GlassButton>
-                <GlassButton
-                  type="button"
-                  variant="secondary"
-                  size="sm"
-                  soundEvent="ui.glass_touch"
-                  onClick={() => onOpenExplore('arena3d')}
-                >
-                  <Gamepad2 className="w-3.5 h-3.5 text-indigo-600 dark:text-indigo-300" />
-                  <span>3D Arena</span>
                 </GlassButton>
               </div>
             </div>
@@ -1170,9 +1151,14 @@ export function SettingsPanel({
                   title: 'Username Directory Discovery',
                   desc: 'Appear in @username search results. Your email address is never shared.',
                 },
+                {
+                  key: 'allowConnectionGameNotifications',
+                  title: 'Connection Game Notifications',
+                  desc: 'Receive quiet updates for Deep Talk Cards invites and Daily Connection Challenges.',
+                },
               ] as const
             ).map((item) => {
-              const enabled = privacy[item.key];
+              const enabled = Boolean(privacy[item.key]);
               return (
                 <div key={item.key} className="flex items-center justify-between gap-4 py-3">
                   <div>

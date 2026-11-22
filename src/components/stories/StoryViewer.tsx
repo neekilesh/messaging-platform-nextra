@@ -116,13 +116,55 @@ export function StoryViewer({
   const handleReact = async (emoji: string) => {
     setReactBurst({ emoji, ts: Date.now() });
     audioManager.play('story.reaction');
-    await apiRequest(`/api/v1/stories/${story.id}/react`, {
-      method: 'POST',
-      body: JSON.stringify({ emoji }),
-    });
-    setFeedback(`Reacted ${emoji}`);
-    setTimeout(() => setFeedback(null), 1500);
-    onRefresh();
+    try {
+      await apiRequest(`/api/v1/stories/${story.id}/react`, {
+        method: 'POST',
+        body: JSON.stringify({ emoji }),
+      });
+
+      if (!isOwner) {
+        try {
+          const convRes = await apiRequest<{ conversationId: string }>('/api/v1/conversations/private', {
+            method: 'POST',
+            body: JSON.stringify({ userId: story.userId }),
+          });
+          const peerRes = await apiRequest<{ user: PublicUser }>(`/api/v1/users/profile/${story.username}`);
+          const msgId = crypto.randomUUID();
+          const recipients: Array<{ userId: string; ecdhPublicJwk: string }> = [
+            { userId: currentUserId, ecdhPublicJwk: JSON.stringify(myKeys.ecdhPublicJwk) },
+          ];
+          if (peerRes.user.ecdhPublicJwk) {
+            recipients.push({ userId: peerRes.user.id, ecdhPublicJwk: peerRes.user.ecdhPublicJwk });
+          }
+          const enc = await encryptPrivateMessage(
+            { text: `Reacted to your story with ${emoji}` },
+            `${convRes.conversationId}:${currentUserId}:${msgId}`,
+            recipients
+          );
+          await apiRequest(`/api/v1/conversations/${convRes.conversationId}/messages`, {
+            method: 'POST',
+            body: JSON.stringify({
+              id: msgId,
+              kind: 'text',
+              ciphertext: enc.ciphertext,
+              iv: enc.iv,
+              aad: enc.aad,
+              recipientEnvelopes: enc.recipientEnvelopes,
+            }),
+          });
+        } catch {
+          // ignore background message delivery error
+        }
+      }
+
+      setFeedback(`Reacted ${emoji} (Sent to creator)`);
+      setTimeout(() => setFeedback(null), 1800);
+      onRefresh();
+    } catch {
+      setFeedback(`Reacted ${emoji}`);
+      setTimeout(() => setFeedback(null), 1500);
+      onRefresh();
+    }
   };
 
   const handlePrivateReply = async (e: React.FormEvent) => {

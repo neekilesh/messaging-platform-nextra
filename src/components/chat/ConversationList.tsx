@@ -6,7 +6,6 @@ import { formatRelativeTimestamp } from '../../lib/time';
 import { useVisualPrefs } from '../../lib/theme';
 import type { ConversationSummary } from '../../types/nexora';
 import { GlassButton, ProfileAvatar } from '../ui/LiquidGlass';
-import { StreakCounter } from './StreakCounter';
 
 interface ConversationListProps {
   conversations: ConversationSummary[];
@@ -176,7 +175,6 @@ export function ConversationList({
                     isOnline={conv.peerUser?.isOnline}
                     isGroup={conv.type === 'group'}
                   />
-                  <StreakCounter streak={conv.streak} variant="avatar" />
                 </div>
 
                 <div className="relative z-10 min-w-0 flex-1">

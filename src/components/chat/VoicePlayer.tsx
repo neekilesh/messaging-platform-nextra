@@ -3,6 +3,8 @@ import { motion } from 'motion/react';
 import { Pause, Play } from 'lucide-react';
 import { audioManager } from '../../audio/AudioManager';
 import { useVisualPrefs } from '../../lib/theme';
+import { analyzeAudioUrlToWaveform } from '../../lib/waveform';
+import { CanvasWaveform } from './CanvasWaveform';
 
 interface VoicePlayerProps {
   audioUrl: string;
@@ -21,8 +23,25 @@ export function VoicePlayer({ audioUrl, durationMs, waveform, isMine }: VoicePla
   const [currentSec, setCurrentSec] = useState(0);
   const [totalSec, setTotalSec] = useState(durationMs ? Math.round(durationMs / 1000) : 0);
   const [speedIdx, setSpeedIdx] = useState(0);
+  const [resolvedWaveform, setResolvedWaveform] = useState<number[]>(
+    waveform && waveform.length > 0 ? waveform : Array(28).fill(0.35)
+  );
 
-  const bars = waveform && waveform.length > 0 ? waveform : Array(24).fill(0.35);
+  useEffect(() => {
+    if (waveform && waveform.length > 0) {
+      setResolvedWaveform(waveform);
+      return;
+    }
+    let active = true;
+    analyzeAudioUrlToWaveform(audioUrl, 32).then((analyzed) => {
+      if (active && analyzed && analyzed.length > 0) {
+        setResolvedWaveform(analyzed);
+      }
+    });
+    return () => {
+      active = false;
+    };
+  }, [audioUrl, waveform]);
 
   useEffect(() => {
     const audio = new Audio(audioUrl);
@@ -73,11 +92,10 @@ export function VoicePlayer({ audioUrl, durationMs, waveform, isMine }: VoicePla
     }
   };
 
-  const seekToBar = (index: number) => {
+  const seekToRatio = (ratio: number) => {
     const audio = audioRef.current;
     if (!audio) return;
     const dur = Number.isFinite(audio.duration) && audio.duration > 0 ? audio.duration : (durationMs || 1000) / 1000;
-    const ratio = (index + 0.5) / bars.length;
     audio.currentTime = ratio * dur;
     setProgress(ratio);
   };
@@ -114,39 +132,12 @@ export function VoicePlayer({ audioUrl, durationMs, waveform, isMine }: VoicePla
       </div>
 
       <div className="flex-1 space-y-1">
-        <div className="flex items-center gap-0.5 h-6">
-          {bars.map((val, idx) => {
-            const active = idx / bars.length <= progress;
-            return (
-              <motion.button
-                key={idx}
-                type="button"
-                animate={
-                  playing && active && !effectiveReducedMotion
-                    ? { scaleY: [1, 1.18, 0.92, 1] }
-                    : { scaleY: 1 }
-                }
-                transition={
-                  playing && active && !effectiveReducedMotion
-                    ? { duration: 0.55, repeat: Infinity, delay: (idx % 4) * 0.08 }
-                    : { duration: 0.15 }
-                }
-                onClick={() => seekToBar(idx)}
-                aria-label={`Seek audio to ${Math.round((idx / bars.length) * 100)}%`}
-                className={`flex-1 rounded-full transition-colors duration-150 cursor-pointer ${
-                  active
-                    ? isMine
-                      ? 'bg-cyan-300 shadow-[0_0_6px_rgba(34,211,238,0.6)]'
-                      : 'bg-violet-600 dark:bg-violet-400'
-                    : isMine
-                    ? 'bg-white/35'
-                    : 'bg-slate-400/50 dark:bg-slate-600/70'
-                }`}
-                style={{ height: `${Math.max(22, Math.round(val * 100))}%` }}
-              />
-            );
-          })}
-        </div>
+        <CanvasWaveform
+          waveform={resolvedWaveform}
+          progress={progress}
+          isMine={isMine}
+          onSeek={seekToRatio}
+        />
         <div className="flex items-center justify-between text-[11px] font-mono-tabular opacity-85">
           <span>{playing ? fmt(currentSec) : fmt(totalSec)}</span>
           <button

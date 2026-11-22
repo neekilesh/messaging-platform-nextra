@@ -4,7 +4,6 @@ import {
   AlertTriangle,
   Bell,
   CircleDot,
-  Gamepad2,
   Lock,
   MapPin,
   MessageCircle,
@@ -59,7 +58,6 @@ import { NotificationsPanel } from './components/social/NotificationsPanel';
 import { SettingsPanel } from './components/settings/SettingsPanel';
 import { AiStudioHub } from './components/ai/AiStudioHub';
 import { MapsExplorerPanel } from './components/maps/MapsExplorerPanel';
-import { NexusArena3D } from './components/three/NexusArena3D';
 
 type NavTab =
   | 'chats'
@@ -68,8 +66,7 @@ type NavTab =
   | 'notifications'
   | 'settings'
   | 'ai'
-  | 'maps'
-  | 'arena3d';
+  | 'maps';
 
 export default function App() {
   const { effectiveReducedMotion } = useVisualPrefs();
@@ -398,7 +395,6 @@ export default function App() {
   const unreadNotifs = notifications.filter((n) => !n.isRead).length;
   const pendingReqCount = friendRequests.filter((r) => r.direction === 'incoming').length;
   const totalUnreadMsgs = conversations.reduce((sum, c) => sum + (c.unreadCount || 0), 0);
-  const activeStreaksCount = friends.filter((f) => f.streak.isActive && f.streak.streakCount > 0).length;
 
   // 5 Primary Liquid Glass Destinations
   const primaryNavItems: GlassNavItem[] = [
@@ -413,7 +409,6 @@ export default function App() {
   const exploreNavItems: Array<{ id: NavTab; label: string; icon: React.ComponentType<{ className?: string }> }> = [
     { id: 'ai', label: 'AI Studio', icon: Sparkles },
     { id: 'maps', label: 'Maps', icon: MapPin },
-    { id: 'arena3d', label: '3D Arena', icon: Gamepad2 },
   ];
 
   const isChatView = navTab === 'chats';
@@ -676,6 +671,8 @@ export default function App() {
                         conversation={activeConversation}
                         allConversations={conversations}
                         currentUserId={user.id}
+                        currentUserDisplayName={user.displayName}
+                        currentUserAvatar={user.avatarUrl}
                         myKeys={myKeys}
                         onBackMobile={() => setActiveConversationId(null)}
                         onConversationUpdated={() => loadWorkspaceData(user, myKeys)}
@@ -749,8 +746,6 @@ export default function App() {
               <AiStudioHub />
             ) : navTab === 'maps' ? (
               <MapsExplorerPanel />
-            ) : navTab === 'arena3d' ? (
-              <NexusArena3D onExit={() => switchNavTab('chats')} />
             ) : navTab === 'people' ? (
               <PeoplePanel
                 friends={friends}
@@ -768,7 +763,6 @@ export default function App() {
                 user={user}
                 myKeys={myKeys}
                 friendsCount={friends.length}
-                activeStreaksCount={activeStreaksCount}
                 onOpenExplore={(target) => switchNavTab(target)}
                 onUserUpdated={(updated) => setUser(updated)}
                 onLogout={handleLogout}

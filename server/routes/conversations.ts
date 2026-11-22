@@ -19,7 +19,6 @@ import {
 } from '../../src/db/schema.ts';
 import { createRequireAuth, getIO, getPublicUserById, isBlockedBetween } from '../context.ts';
 import type { AuthedRequest } from '../context.ts';
-import { getStreakInfo, recordStreakActivity } from '../streaks.ts';
 import type {
   EncryptedMessageReaction,
   MessageReactionItem,
@@ -294,7 +293,6 @@ export function createConversationsRouter(database: PgDatabase) {
         let subtitle = '';
         let avatarUrl = row.groupAvatar || null;
         let peerUser = null;
-        let streak = null;
         let groupMemberCount: number | null = null;
         let myEpochEnvelopes = undefined;
 
@@ -317,7 +315,6 @@ export function createConversationsRouter(database: PgDatabase) {
           title = peerUser.displayName;
           subtitle = `@${peerUser.username}`;
           avatarUrl = peerUser.avatarUrl;
-          streak = await getStreakInfo(database, req.userId!, other.userId);
         } else if (row.groupId) {
           const countRows = await database
             .select({ cnt: count() })
@@ -376,7 +373,6 @@ export function createConversationsRouter(database: PgDatabase) {
           muted: row.muted === 1,
           archived: row.archived === 1,
           unreadCount: row.unreadCount,
-          streak,
           lastMessage,
           lastMessageAt: row.lastMessageAt,
           ...(myEpochEnvelopes ? { myEpochEnvelopes } : {}),
@@ -751,23 +747,6 @@ export function createConversationsRouter(database: PgDatabase) {
         }
       });
 
-      let updatedStreak = null;
-      if (conv.type === 'private' && kind !== 'system') {
-        const otherRows = await database
-          .select({ userId: conversationParticipants.userId })
-          .from(conversationParticipants)
-          .where(
-            and(
-              eq(conversationParticipants.conversationId, convId),
-              ne(conversationParticipants.userId, req.userId!)
-            )
-          )
-          .limit(1);
-        if (otherRows[0]) {
-          updatedStreak = await recordStreakActivity(database, req.userId!, otherRows[0].userId, nowMs);
-        }
-      }
-
       const rowList = await database
         .select()
         .from(messages)
@@ -786,14 +765,12 @@ export function createConversationsRouter(database: PgDatabase) {
           io.to(`user:${p.userId}`).emit('message:new', {
             conversationId: convId,
             message: personalized,
-            streak: updatedStreak,
           });
         }
       }
 
       return res.status(201).json({
         message: await hydrateMessageRow(database, row, req.userId!),
-        streak: updatedStreak,
       });
     } catch (error) {
       console.error('send message error:', error);

@@ -17,8 +17,6 @@ import {
   isBlockedBetween,
 } from '../context.ts';
 import type { AuthedRequest } from '../context.ts';
-import { getStreakInfo } from '../streaks.ts';
-import { calculateFriendStreakCountdown } from '../../src/lib/streak.ts';
 
 function orderPair(a: string, b: string): [string, string] {
   return a < b ? [a, b] : [b, a];
@@ -44,7 +42,6 @@ export function createFriendsRouter(database: PgDatabase) {
         .orderBy(desc(friendships.createdAt));
 
       const friends = [];
-      const nowMs = Date.now();
       for (const r of rows) {
         const peerId = r.userAId === req.userId ? r.userBId : r.userAId;
         if (await isBlockedBetween(database, req.userId!, peerId)) continue;
@@ -57,15 +54,9 @@ export function createFriendsRouter(database: PgDatabase) {
           .where(eq(conversations.privatePairKey, `${a}:${b}`))
           .limit(1);
 
-        const streak = await getStreakInfo(database, req.userId!, peerId, nowMs);
-        const countdown = calculateFriendStreakCountdown(streak, nowMs);
-
         friends.push({
           friendshipId: r.id,
           user,
-          streak,
-          streakExpiringCountdown: countdown.formattedCountdown,
-          streakRemainingMs: countdown.remainingMs,
           conversationId: convRows[0]?.id || null,
           createdAt: r.createdAt,
         });

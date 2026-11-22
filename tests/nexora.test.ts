@@ -7,7 +7,6 @@ import { createPool, db } from '../src/db/index.ts';
 import { messageReactions, messages, stories, users } from '../src/db/schema.ts';
 import { createApiApp, runRetentionCleanup } from '../server/app.ts';
 import { setupSocketServer } from '../server/socket.ts';
-import { recordStreakActivity } from '../server/streaks.ts';
 
 const subtle = crypto.webcrypto.subtle;
 const enc = new TextEncoder();
@@ -623,7 +622,7 @@ describe('NEXORA Full-Stack Integration & Security Suite', () => {
     assert.equal(removedAccess.status, 403);
   });
 
-  test('Media Authorization, 24h Stories Expiration & Server-Side Streaks', async () => {
+  test('Media Authorization & 24h Stories Expiration', async () => {
     const u1 = await registerUser('media_u1@nexora.test', 'MoonLight');
     const u2 = await registerUser('media_u2@nexora.test', 'StarGazer');
     const stranger = await registerUser('media_u3@nexora.test', 'Intruder99');
@@ -697,13 +696,5 @@ describe('NEXORA Full-Stack Integration & Security Suite', () => {
     await runRetentionCleanup(db);
     const storiesAfter = await api('/api/v1/stories', {}, u2.token);
     assert.equal(storiesAfter.data.stories.length, 0);
-
-    // Server-side reciprocal Streak calculation
-    const t0 = Date.now();
-    const s1 = await recordStreakActivity(db, u1.user.id, u2.user.id, t0);
-    assert.equal(s1.streakCount, 0);
-    const s2 = await recordStreakActivity(db, u2.user.id, u1.user.id, t0 + 60_000);
-    assert.equal(s2.streakCount, 1);
-    assert.equal(s2.isActive, true);
   });
 });

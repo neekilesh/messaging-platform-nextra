@@ -6,19 +6,32 @@ const SOCKET_URL =
 
 let socket: Socket | null = null;
 
+function resolveClientTimezone(): string {
+  try {
+    if (typeof Intl !== 'undefined') {
+      return Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
+    }
+  } catch {
+    // ignore Intl fallback error
+  }
+  return 'UTC';
+}
+
 export function connectSocket(): Socket | null {
   const token = getStoredToken();
   if (!token) return null;
 
+  const timezone = resolveClientTimezone();
+
   if (socket) {
     if (socket.connected) return socket;
-    socket.auth = { token };
+    socket.auth = { token, timezone };
     socket.connect();
     return socket;
   }
 
   socket = io(SOCKET_URL, {
-    auth: { token },
+    auth: { token, timezone },
     withCredentials: true,
     transports: ['websocket', 'polling'],
     reconnection: true,

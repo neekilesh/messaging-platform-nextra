@@ -16,6 +16,7 @@ import { createMediaRouter } from './routes/media.ts';
 import { createStoriesRouter } from './routes/stories.ts';
 import { createNotificationsRouter } from './routes/notifications.ts';
 import { createAiRouter } from './routes/ai.ts';
+import { createConnectionGamesRouter } from './routes/connection-games.ts';
 import { getIO } from './context.ts';
 
 export async function runRetentionCleanup(database: PgDatabase) {
@@ -114,6 +115,7 @@ export function createApiApp(database: PgDatabase) {
   app.use('/api/v1/stories', createStoriesRouter(database));
   app.use('/api/v1/notifications', createNotificationsRouter(database));
   app.use('/api/v1/ai', createAiRouter(database));
+  app.use('/api/v1/connection-games', createConnectionGamesRouter(database));
 
   app.use('/api', (_req, res) => {
     return res.status(404).json({ error: 'API endpoint not found.' });

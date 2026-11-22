@@ -87,7 +87,7 @@ export function PeoplePanel({ friends, requests, onStartChat, onRefresh }: Peopl
       body: JSON.stringify({ action }),
     });
     if (action === 'accept') {
-      setStatusMsg('Connection accepted! Encrypted chat & streaks unlocked.');
+      setStatusMsg('Connection accepted! Encrypted chat & connection games unlocked.');
       setCelebrateKey(Date.now());
       audioManager.play('friend.request_accept');
     } else {
