@@ -47,7 +47,7 @@ import {
   type StoredLocalKeyBundle,
 } from '../../lib/crypto';
 import { getSocket } from '../../lib/socket';
-import { audioManager } from '../../audio/AudioManager';
+import { globalSoundManager } from '../../audio/GlobalSoundManager';
 import { formatFullTimestamp, formatRelativeTimestamp } from '../../lib/time';
 import { useVisualPrefs } from '../../lib/theme';
 import type {
@@ -549,39 +549,50 @@ export function ChatWindow({
       message: MessageRecord;
     }) => {
       if (data.conversationId !== conversation.id) return;
-      if (conversation.type === 'group' && data.message.epoch && !epochKeysRef.current.has(data.message.epoch)) {
-        await loadGroupEpochKeys();
-      }
-      const decrypted = await decryptMessageItem(data.message);
-      let isFreshInsertion = false;
-      setMessages((prev) => {
-        if (prev.some((m) => m.id === decrypted.id)) {
-          return prev.map((m) => (m.id === decrypted.id ? decrypted : m));
-        }
-        isFreshInsertion = true;
-        return [...prev, decrypted];
-      });
-      if (isFreshInsertion && !prefersReducedMotion) {
-        setLiveArrivalIds((prev) => {
-          const next = new Set(prev);
-          next.add(decrypted.id);
-          return next;
-        });
-        window.setTimeout(() => {
-          setLiveArrivalIds((prev) => {
-            if (!prev.has(decrypted.id)) return prev;
-            const next = new Set(prev);
-            next.delete(decrypted.id);
-            return next;
-          });
-        }, 1200);
-      }
+
       if (data.message.senderId !== currentUserId) {
-        if (isFreshInsertion) {
+        const isVoice = data.message.kind === 'voice';
+        if (isVoice) {
+          audioManager.play('voice.receive');
+        } else {
           audioManager.play(conversation.type === 'group' ? 'group.receive' : 'message.receive');
         }
         sock.emit('message:delivered', { messageId: data.message.id, conversationId: conversation.id });
-        sendSignedReadReceipts([decrypted]).catch(() => {});
+      }
+
+      try {
+        if (conversation.type === 'group' && data.message.epoch && !epochKeysRef.current.has(data.message.epoch)) {
+          await loadGroupEpochKeys();
+        }
+        const decrypted = await decryptMessageItem(data.message);
+        let isFreshInsertion = false;
+        setMessages((prev) => {
+          if (prev.some((m) => m.id === decrypted.id)) {
+            return prev.map((m) => (m.id === decrypted.id ? decrypted : m));
+          }
+          isFreshInsertion = true;
+          return [...prev, decrypted];
+        });
+        if (isFreshInsertion && !prefersReducedMotion) {
+          setLiveArrivalIds((prev) => {
+            const next = new Set(prev);
+            next.add(decrypted.id);
+            return next;
+          });
+          window.setTimeout(() => {
+            setLiveArrivalIds((prev) => {
+              if (!prev.has(decrypted.id)) return prev;
+              const next = new Set(prev);
+              next.delete(decrypted.id);
+              return next;
+            });
+          }, 1200);
+        }
+        if (data.message.senderId !== currentUserId) {
+          sendSignedReadReceipts([decrypted]).catch(() => {});
+        }
+      } catch (decErr) {
+        console.error('Failed to decrypt incoming message item:', decErr);
       }
       setTimeout(() => bottomRef.current?.scrollIntoView({ behavior: 'smooth' }), 60);
     };
@@ -882,6 +893,10 @@ export function ChatWindow({
     setMessages((prev) => [...prev, optimistic]);
     setTimeout(() => bottomRef.current?.scrollIntoView({ behavior: 'smooth' }), 30);
 
+    if (kind !== 'voice') {
+      audioManager.play(conversation.type === 'group' ? 'group.send' : 'message.send');
+    }
+
     try {
       const encrypted = await encryptPayloadForConversation(payload, msgId);
       const res = await apiRequest<{ message: MessageRecord }>(
@@ -905,9 +920,6 @@ export function ChatWindow({
 
       const hydrated = { ...res.message, localDecrypted: payload };
       setMessages((prev) => prev.map((m) => (m.id === msgId ? hydrated : m)));
-      if (kind !== 'voice') {
-        audioManager.play(conversation.type === 'group' ? 'group.send' : 'message.send');
-      }
       if (!prefersReducedMotion) {
         setSendConfirmBurstKey(Date.now());
         setLastConfirmedMsgId(msgId);

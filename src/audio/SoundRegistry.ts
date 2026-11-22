@@ -39,6 +39,7 @@ export type SoundEventId =
   | 'voice.record_start'
   | 'voice.record_stop'
   | 'voice.send'
+  | 'voice.receive'
   | 'voice.play_start'
   | 'voice.play_end'
   | 'voice.delete'
@@ -74,6 +75,7 @@ export type SoundEventId =
   | 'ui.glass_touch'
   | 'ui.glass_open'
   | 'ui.glass_close'
+  | 'ui.feature_open'
   | 'ui.chat_open'
   | 'ui.chat_close'
   | 'ui.menu_open'
@@ -181,47 +183,50 @@ export const SOUND_REGISTRY: Record<SoundEventId, SoundDefinition> = {
     ],
   },
 
-  // 2. NEXORA Message Pulse (~180ms crystal pulse)
+  // 2. NEXORA Message Send: Soft outgoing message pop
   'message.send': {
     category: 'messages',
-    cooldownMs: 90,
+    cooldownMs: 80,
     priority: 3,
     hapticMs: 10,
     steps: [
-      { freq: 440, freqEnd: 698.46, duration: 0.14, gain: 0.2, wave: 'sine', filterFreq: 4800 },
-      { freq: 880, freqEnd: 1174.66, delay: 0.04, duration: 0.15, gain: 0.1, wave: 'triangle', filterFreq: 5200 },
+      { freq: 460, freqEnd: 740, duration: 0.09, gain: 0.22, wave: 'sine', filterFreq: 4200 },
+      { freq: 920, freqEnd: 1100, delay: 0.02, duration: 0.07, gain: 0.1, wave: 'triangle', filterFreq: 5000 },
     ],
   },
 
-  // 3. NEXORA Cosmic Signal (~0.9s pleasant dual chime)
+  // 3. NEXORA Message Receive: Gentle incoming message notification
   'message.receive': {
     category: 'messages',
-    cooldownMs: 320,
-    priority: 3,
+    cooldownMs: 250,
+    priority: 4,
+    hapticMs: 12,
     steps: [
-      { freq: 587.33, duration: 0.18, gain: 0.19, wave: 'sine', filterFreq: 4400 },
-      { freq: 880.0, delay: 0.09, duration: 0.34, gain: 0.17, wave: 'sine', filterFreq: 4800 },
-      { freq: 1174.66, delay: 0.18, duration: 0.42, gain: 0.09, wave: 'triangle', filterFreq: 5200 },
+      { freq: 659.25, duration: 0.16, gain: 0.2, wave: 'sine', filterFreq: 4600 },
+      { freq: 880.0, delay: 0.07, duration: 0.28, gain: 0.18, wave: 'sine', filterFreq: 5200 },
+      { freq: 1174.66, delay: 0.14, duration: 0.35, gain: 0.11, wave: 'triangle', filterFreq: 5600 },
     ],
   },
 
+  // Subtle delivery confirmation
   'message.delivered': {
     category: 'messages',
-    cooldownMs: 250,
+    cooldownMs: 150,
     priority: 1,
     steps: [
-      { freq: 720, duration: 0.06, gain: 0.09, wave: 'sine' },
-      { freq: 960, delay: 0.05, duration: 0.08, gain: 0.08, wave: 'sine' },
+      { freq: 880, duration: 0.04, gain: 0.08, wave: 'sine', filterFreq: 4000 },
+      { freq: 1174.66, delay: 0.035, duration: 0.05, gain: 0.07, wave: 'sine', filterFreq: 4600 },
     ],
   },
 
+  // Very subtle read confirmation, if enabled
   'message.read': {
     category: 'messages',
-    cooldownMs: 400,
+    cooldownMs: 200,
     priority: 1,
     steps: [
-      { freq: 1174.66, duration: 0.1, gain: 0.065, wave: 'sine' },
-      { freq: 1567.98, delay: 0.045, duration: 0.15, gain: 0.055, wave: 'sine' },
+      { freq: 1318.51, duration: 0.06, gain: 0.05, wave: 'sine', filterFreq: 5000 },
+      { freq: 1760.0, delay: 0.035, duration: 0.09, gain: 0.045, wave: 'sine', filterFreq: 5800 },
     ],
   },
 
@@ -516,13 +521,27 @@ export const SOUND_REGISTRY: Record<SoundEventId, SoundDefinition> = {
     ],
   },
 
+  // Sending a voice message: Soft send confirmation
   'voice.send': {
     category: 'voiceUi',
-    cooldownMs: 150,
+    cooldownMs: 120,
     priority: 3,
     hapticMs: 10,
     steps: [
-      { freq: 480, freqEnd: 740, duration: 0.14, gain: 0.16, wave: 'sine' },
+      { freq: 440, freqEnd: 740, duration: 0.13, gain: 0.18, wave: 'sine', filterFreq: 4000 },
+    ],
+  },
+
+  // Receiving a voice message: Incoming message notification
+  'voice.receive': {
+    category: 'messages',
+    cooldownMs: 250,
+    priority: 4,
+    hapticMs: 12,
+    steps: [
+      { freq: 523.25, duration: 0.15, gain: 0.19, wave: 'sine', filterFreq: 4200 },
+      { freq: 783.99, delay: 0.07, duration: 0.26, gain: 0.17, wave: 'sine', filterFreq: 4800 },
+      { freq: 1046.5, delay: 0.14, duration: 0.32, gain: 0.1, wave: 'triangle', filterFreq: 5200 },
     ],
   },
 
@@ -579,20 +598,24 @@ export const SOUND_REGISTRY: Record<SoundEventId, SoundDefinition> = {
     steps: [{ freq: 540, freqEnd: 320, duration: 0.12, gain: 0.09 }],
   },
 
+  // Uploading media: Subtle upload start sound
   'media.upload_start': {
     category: 'messages',
-    cooldownMs: 200,
-    priority: 1,
-    steps: [{ freq: 440, freqEnd: 587.33, duration: 0.1, gain: 0.085 }],
+    cooldownMs: 150,
+    priority: 2,
+    steps: [{ freq: 440, freqEnd: 620, duration: 0.08, gain: 0.09, wave: 'sine', filterFreq: 3800 }],
   },
 
+  // Media upload completed: Bright confirmation chime
   'media.upload_success': {
     category: 'messages',
-    cooldownMs: 200,
-    priority: 2,
+    cooldownMs: 180,
+    priority: 3,
+    hapticMs: 10,
     steps: [
-      { freq: 587.33, duration: 0.09, gain: 0.13 },
-      { freq: 880, delay: 0.06, duration: 0.16, gain: 0.14 },
+      { freq: 659.25, duration: 0.1, gain: 0.15, wave: 'sine', filterFreq: 4600 },
+      { freq: 987.77, delay: 0.05, duration: 0.14, gain: 0.14, wave: 'sine', filterFreq: 5200 },
+      { freq: 1318.51, delay: 0.11, duration: 0.24, gain: 0.13, wave: 'triangle', filterFreq: 5800 },
     ],
   },
 
@@ -769,26 +792,39 @@ export const SOUND_REGISTRY: Record<SoundEventId, SoundDefinition> = {
   },
 
   // Liquid Glass UI & Transitions
-  // 4. NEXORA Glass Touch (~60ms tactile glass click)
+  // Button click & glass touch: Soft tactile click
   'ui.glass_touch': {
     category: 'ui',
-    cooldownMs: 50,
+    cooldownMs: 40,
     priority: 1,
     hapticMs: 5,
     ignorePackPitch: true,
     steps: [
-      { freq: 760, freqEnd: 420, duration: 0.036, gain: 0.07, wave: 'sine', filterFreq: 3600 },
+      { freq: 780, freqEnd: 420, duration: 0.028, gain: 0.065, wave: 'sine', filterFreq: 3200 },
     ],
   },
 
   'ui.click': {
     category: 'ui',
-    cooldownMs: 50,
+    cooldownMs: 40,
     priority: 1,
     hapticMs: 5,
     ignorePackPitch: true,
     steps: [
-      { freq: 720, freqEnd: 390, duration: 0.034, gain: 0.068, wave: 'sine', filterFreq: 3400 },
+      { freq: 780, freqEnd: 420, duration: 0.028, gain: 0.065, wave: 'sine', filterFreq: 3200 },
+    ],
+  },
+
+  // Opening a feature / glass dialog: Subtle magical transition
+  'ui.feature_open': {
+    category: 'ui',
+    cooldownMs: 120,
+    priority: 2,
+    hapticMs: 8,
+    steps: [
+      { freq: 440, duration: 0.11, gain: 0.12, wave: 'sine', filterFreq: 3800 },
+      { freq: 659.25, delay: 0.05, duration: 0.14, gain: 0.11, wave: 'sine', filterFreq: 4400 },
+      { freq: 880, delay: 0.1, duration: 0.22, gain: 0.1, wave: 'triangle', filterFreq: 5200 },
     ],
   },
 
@@ -796,9 +832,11 @@ export const SOUND_REGISTRY: Record<SoundEventId, SoundDefinition> = {
     category: 'ui',
     cooldownMs: 120,
     priority: 2,
+    hapticMs: 8,
     steps: [
-      { freq: 340, freqEnd: 580, duration: 0.14, gain: 0.11, wave: 'sine' },
-      { freq: 720, delay: 0.04, duration: 0.14, gain: 0.08, wave: 'sine' },
+      { freq: 440, duration: 0.11, gain: 0.12, wave: 'sine', filterFreq: 3800 },
+      { freq: 659.25, delay: 0.05, duration: 0.14, gain: 0.11, wave: 'sine', filterFreq: 4400 },
+      { freq: 880, delay: 0.1, duration: 0.22, gain: 0.1, wave: 'triangle', filterFreq: 5200 },
     ],
   },
 
@@ -806,25 +844,27 @@ export const SOUND_REGISTRY: Record<SoundEventId, SoundDefinition> = {
     category: 'ui',
     cooldownMs: 120,
     priority: 1,
-    steps: [{ freq: 520, freqEnd: 290, duration: 0.13, gain: 0.095, wave: 'sine' }],
+    steps: [{ freq: 587.33, freqEnd: 392.0, duration: 0.14, gain: 0.095, wave: 'sine', filterFreq: 3400 }],
   },
 
-  // 5. NEXORA Celestial Transition (~240ms airy portal)
+  // Opening a chat: Gentle glass-like opening sound
   'ui.chat_open': {
     category: 'ui',
-    cooldownMs: 160,
+    cooldownMs: 120,
     priority: 2,
+    hapticMs: 8,
     steps: [
-      { freq: 293.66, freqEnd: 587.33, duration: 0.18, gain: 0.13, wave: 'sine' },
-      { freq: 587.33, freqEnd: 880, delay: 0.045, duration: 0.2, gain: 0.09, wave: 'sine' },
+      { freq: 392.0, freqEnd: 587.33, duration: 0.16, gain: 0.13, wave: 'sine', filterFreq: 3600 },
+      { freq: 783.99, delay: 0.04, duration: 0.2, gain: 0.1, wave: 'sine', filterFreq: 4400 },
     ],
   },
 
+  // Closing a chat: Soft closing sound
   'ui.chat_close': {
     category: 'ui',
-    cooldownMs: 160,
+    cooldownMs: 120,
     priority: 1,
-    steps: [{ freq: 493.88, freqEnd: 261.63, duration: 0.16, gain: 0.11, wave: 'sine' }],
+    steps: [{ freq: 587.33, freqEnd: 392.0, duration: 0.14, gain: 0.1, wave: 'sine', filterFreq: 3400 }],
   },
 
   'ui.menu_open': {
@@ -834,20 +874,21 @@ export const SOUND_REGISTRY: Record<SoundEventId, SoundDefinition> = {
     steps: [{ freq: 420, freqEnd: 620, duration: 0.095, gain: 0.1, wave: 'sine' }],
   },
 
+  // Switching navigation tabs: Short transition sound
   'ui.nav_switch': {
     category: 'ui',
-    cooldownMs: 80,
+    cooldownMs: 60,
     priority: 1,
     hapticMs: 6,
-    steps: [{ freq: 560, freqEnd: 720, duration: 0.065, gain: 0.09, wave: 'sine' }],
+    steps: [{ freq: 520, freqEnd: 740, duration: 0.06, gain: 0.085, wave: 'sine', filterFreq: 3800 }],
   },
 
   'ui.tab_switch': {
     category: 'ui',
-    cooldownMs: 80,
+    cooldownMs: 60,
     priority: 1,
     hapticMs: 5,
-    steps: [{ freq: 540, freqEnd: 680, duration: 0.06, gain: 0.085, wave: 'sine' }],
+    steps: [{ freq: 520, freqEnd: 720, duration: 0.055, gain: 0.08, wave: 'sine', filterFreq: 3600 }],
   },
 
   'ui.theme_change': {

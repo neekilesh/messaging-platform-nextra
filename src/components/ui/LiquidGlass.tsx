@@ -112,6 +112,7 @@ export function GlassButton({
   return (
     <button
       onClick={handleClick}
+      data-sound-custom="true"
       className={`relative z-10 inline-flex items-center justify-center gap-2 font-medium transition-all duration-150 active:scale-[0.97] disabled:opacity-45 disabled:pointer-events-none cursor-pointer whitespace-nowrap shrink-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-400/70 ${BTN_VARIANT[variant]} ${BTN_SIZE[size]} ${className}`}
       {...rest}
     >

@@ -14,7 +14,7 @@ import {
   Users,
   X,
 } from 'lucide-react';
-import { audioManager } from './audio/AudioManager';
+import { globalSoundManager } from './audio/GlobalSoundManager';
 import { apiRequest, getStoredToken, setStoredToken } from './lib/api';
 import {
   decryptGroupMessage,
@@ -95,9 +95,9 @@ export default function App() {
 
   useEffect(() => {
     if (activeConversationId && activeConversationId !== prevActiveConversationIdRef.current) {
-      audioManager.play('ui.chat_open');
+      globalSoundManager.playChatOpen();
     } else if (!activeConversationId && prevActiveConversationIdRef.current) {
-      audioManager.play('ui.chat_close');
+      globalSoundManager.playChatClose();
     }
     prevActiveConversationIdRef.current = activeConversationId;
   }, [activeConversationId]);
@@ -115,7 +115,7 @@ export default function App() {
   const switchNavTab = useCallback(
     (next: NavTab) => {
       if (next !== navTab) {
-        audioManager.play('ui.nav_switch');
+        globalSoundManager.playTabSwitch();
       }
       setNavTab(next);
       if (next === 'chats') {
@@ -278,31 +278,31 @@ export default function App() {
       ) {
         const conv = conversationsRef.current.find((c) => c.id === data.conversationId);
         if (conv?.type === 'group') {
-          audioManager.play('notify.group');
+          globalSoundManager.playNotificationGroup();
         } else {
-          audioManager.play('notify.private');
+          globalSoundManager.playNotificationPrivate();
         }
       }
       refreshAll();
     };
 
     const handleFriendRequestEvent = () => {
-      audioManager.play('notify.friend_request');
+      globalSoundManager.playFriendRequest();
       refreshAll();
     };
 
     const handleFriendAcceptedEvent = () => {
-      audioManager.play('notify.friend_accepted');
+      globalSoundManager.playFriendAccepted();
       refreshAll();
     };
 
     const handleStoryNewEvent = () => {
-      audioManager.play('notify.story_new');
+      globalSoundManager.playStoryNew();
       refreshAll();
     };
 
     const handleNotificationEvent = () => {
-      audioManager.play('notify.private');
+      globalSoundManager.playNotificationPrivate();
       refreshAll();
     };
 
@@ -344,14 +344,14 @@ export default function App() {
   }, [user, myKeys, loadWorkspaceData]);
 
   const handleAuthenticated = async (authUser: AuthUser, keys: StoredLocalKeyBundle) => {
-    audioManager.play('ui.settings_saved');
+    globalSoundManager.playSettingsSaved();
     setUser(authUser);
     setMyKeys(keys);
     await loadWorkspaceData(authUser, keys);
   };
 
   const handleLogout = async () => {
-    audioManager.play('ui.logout');
+    globalSoundManager.playLogout();
     await apiRequest('/api/v1/auth/logout', { method: 'POST' }).catch(() => {});
     disconnectSocket();
     setStoredToken(null);
@@ -628,13 +628,13 @@ export default function App() {
                     currentUser={user}
                     stories={stories}
                     onOpenCreate={() => {
-                      audioManager.play('ui.glass_open');
+                      globalSoundManager.playFeatureOpen();
                       setShowCreateStory(true);
                     }}
                     onOpenUserStories={(uid) => {
                       const idx = stories.findIndex((s) => s.userId === uid);
                       if (idx >= 0) {
-                        audioManager.play('story.open');
+                        globalSoundManager.playStoryOpen();
                         setStoryViewerIndex(idx);
                       }
                     }}
@@ -650,7 +650,7 @@ export default function App() {
                       onFilterTabChange={setChatFilter}
                       onSelect={(conv) => setActiveConversationId(conv.id)}
                       onOpenCreateGroup={() => {
-                        audioManager.play('ui.glass_open');
+                        globalSoundManager.playFeatureOpen();
                         setShowCreateGroup(true);
                       }}
                       onOpenPeopleSearch={() => switchNavTab('people')}
@@ -707,7 +707,7 @@ export default function App() {
                               type="button"
                               variant="secondary"
                               onClick={() => {
-                                audioManager.play('ui.glass_open');
+                                globalSoundManager.playFeatureOpen();
                                 setShowCreateGroup(true);
                               }}
                             >
@@ -734,11 +734,11 @@ export default function App() {
                 currentUser={user}
                 stories={stories}
                 onOpenCreate={() => {
-                  audioManager.play('ui.glass_open');
+                  globalSoundManager.playFeatureOpen();
                   setShowCreateStory(true);
                 }}
                 onOpenStoryIndex={(idx) => {
-                  audioManager.play('story.open');
+                  globalSoundManager.playStoryOpen();
                   setStoryViewerIndex(idx);
                 }}
               />
@@ -788,14 +788,17 @@ export default function App() {
           myKeys={myKeys}
           friends={friends.map((f) => f.user)}
           onCreated={async (convId) => {
-            audioManager.play('group.create');
+            globalSoundManager.playGroupCreate();
             setShowCreateGroup(false);
             await loadWorkspaceData(user, myKeys);
             setNavTab('chats');
             setChatFilter('all');
             setActiveConversationId(convId);
           }}
-          onClose={() => setShowCreateGroup(false)}
+          onClose={() => {
+            globalSoundManager.playGlassClose();
+            setShowCreateGroup(false);
+          }}
         />
       )}
 
@@ -805,11 +808,14 @@ export default function App() {
           myKeys={myKeys}
           friends={friends.map((f) => f.user)}
           onCreated={async () => {
-            audioManager.play('story.upload');
+            globalSoundManager.playStoryUpload();
             setShowCreateStory(false);
             await loadWorkspaceData(user, myKeys);
           }}
-          onClose={() => setShowCreateStory(false)}
+          onClose={() => {
+            globalSoundManager.playGlassClose();
+            setShowCreateStory(false);
+          }}
         />
       )}
 
@@ -821,7 +827,7 @@ export default function App() {
             currentUserId={user.id}
             myKeys={myKeys}
             onClose={() => {
-              audioManager.play('story.close');
+              globalSoundManager.playStoryClose();
               setStoryViewerIndex(null);
             }}
             onRefresh={() => loadWorkspaceData(user, myKeys)}

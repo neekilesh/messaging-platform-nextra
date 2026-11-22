@@ -3,14 +3,48 @@ import type { SoundPackMeta, SoundThemeId } from './SoundSettings';
 
 const PRELOAD_EVENTS: SoundEventId[] = [
   'app.awakening',
+  'ui.click',
   'ui.glass_touch',
   'ui.nav_switch',
+  'ui.tab_switch',
   'ui.chat_open',
+  'ui.chat_close',
+  'ui.feature_open',
+  'ui.glass_open',
+  'ui.glass_close',
+  'ui.menu_open',
+  'ui.settings_saved',
+  'ui.logout',
   'message.send',
   'message.receive',
+  'message.delivered',
+  'message.read',
   'message.react',
+  'message.reply',
+  'message.failed',
+  'message.deleted',
+  'message.copy',
+  'group.send',
+  'group.receive',
+  'group.create',
+  'voice.send',
+  'voice.receive',
+  'media.select',
+  'media.upload_start',
+  'media.upload_success',
+  'media.upload_error',
+  'media.menu_open',
+  'media.preview_open',
+  'media.preview_close',
+  'story.open',
+  'story.close',
+  'story.upload',
   'notify.private',
   'notify.group',
+  'notify.friend_request',
+  'notify.friend_accepted',
+  'notify.story_new',
+  'achievement.streak_milestone',
 ];
 
 class AudioPreloader {
@@ -23,6 +57,14 @@ class AudioPreloader {
 
   getCached(packId: string, event: SoundEventId): AudioBuffer | null {
     return this.bufferCache.get(this.key(packId, event)) || null;
+  }
+
+  hasCached(packId: string, event: SoundEventId): boolean {
+    return this.bufferCache.has(this.key(packId, event));
+  }
+
+  getCachedCount(): number {
+    return this.bufferCache.size;
   }
 
   clear(): void {
@@ -118,6 +160,21 @@ class AudioPreloader {
     for (const ev of PRELOAD_EVENTS) {
       void this.renderBuffer(sampleRate, pack, ev, themeId);
     }
+  }
+
+  async preloadEvents(
+    events: SoundEventId[],
+    sampleRate: number,
+    resolveMeta: (event: SoundEventId) => { pack: SoundPackMeta; themeId: SoundThemeId }
+  ): Promise<number> {
+    if (typeof OfflineAudioContext === 'undefined') return this.bufferCache.size;
+    await Promise.all(
+      events.map((ev) => {
+        const { pack, themeId } = resolveMeta(ev);
+        return this.renderBuffer(sampleRate, pack, ev, themeId);
+      })
+    );
+    return this.bufferCache.size;
   }
 }
 

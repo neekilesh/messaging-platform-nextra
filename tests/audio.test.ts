@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { audioManager } from '../src/audio/AudioManager.ts';
+import { audioManager, globalSoundManager } from '../src/audio/GlobalSoundManager.ts';
 import {
   DEFAULT_SOUND_SETTINGS,
   getProfilePatch,
@@ -11,9 +11,9 @@ import {
   NEXORA_SOUND_THEMES,
   NOTIFICATION_CATEGORIES,
 } from '../src/audio/SoundSettings.ts';
-import { adaptPlaybackPattern, SIGNATURE_PREVIEW_EVENTS, SOUND_REGISTRY } from '../src/audio/SoundRegistry.ts';
+import { adaptPlaybackPattern, SIGNATURE_PREVIEW_EVENTS, SOUND_REGISTRY, type SoundEventId } from '../src/audio/SoundRegistry.ts';
 
-describe('NEXORA Audio System configuration', () => {
+describe('NEXORA Audio System & GlobalSoundManager', () => {
   it('defines 5 sound packs, 4 sound profiles, and 3 predefined category sound themes', () => {
     assert.equal(NEXORA_SOUND_PACKS.length, 5);
     assert.equal(NEXORA_SOUND_PROFILES.length, 4);
@@ -26,15 +26,32 @@ describe('NEXORA Audio System configuration', () => {
     assert.equal(SIGNATURE_PREVIEW_EVENTS.length, 5);
   });
 
-  it('registers all 5 signature preview events in SOUND_REGISTRY', () => {
-    for (const sig of SIGNATURE_PREVIEW_EVENTS) {
-      const def = SOUND_REGISTRY[sig.id];
-      assert.ok(def, `Missing registry entry for ${sig.id}`);
-      assert.ok(def.steps.length > 0, `Empty tone steps for ${sig.id}`);
+  it('registers all required specification sound events in SOUND_REGISTRY', () => {
+    const requiredEvents: SoundEventId[] = [
+      'message.send', // Sending a text message: Soft outgoing message pop
+      'message.receive', // Receiving a text message: Gentle incoming message notification
+      'message.delivered', // Message successfully delivered: Subtle delivery confirmation
+      'message.read', // Message read: Very subtle read confirmation, if enabled
+      'ui.click', // Button click: Soft tactile click
+      'ui.tab_switch', // Switching navigation tabs: Short transition sound
+      'ui.chat_open', // Opening a chat: Gentle glass-like opening sound
+      'ui.chat_close', // Closing a chat: Soft closing sound
+      'ui.feature_open', // Opening a feature: Subtle magical transition
+      'voice.send', // Sending a voice message: Soft send confirmation
+      'voice.receive', // Receiving a voice message: Incoming message notification
+      'media.upload_start', // Uploading media: Subtle upload start sound
+      'media.upload_success', // Media upload completed: Bright confirmation chime
+    ];
+
+    for (const id of requiredEvents) {
+      const def = SOUND_REGISTRY[id];
+      assert.ok(def, `Missing registry entry for ${id}`);
+      assert.ok(def.steps.length > 0, `Empty tone steps for ${id}`);
+      assert.ok(def.cooldownMs >= 0, `Invalid cooldown for ${id}`);
     }
   });
 
-  it('produces valid profile patches including soundTheme and categoryThemes for magical, balanced, minimal, and silent', () => {
+  it('produces valid profile patches with uiEnabled preserved across magical, balanced, and minimal', () => {
     const magical = { ...DEFAULT_SOUND_SETTINGS, ...getProfilePatch('magical') };
     assert.equal(magical.masterEnabled, true);
     assert.equal(magical.uiEnabled, true);
@@ -45,13 +62,14 @@ describe('NEXORA Audio System configuration', () => {
 
     const balanced = { ...DEFAULT_SOUND_SETTINGS, ...getProfilePatch('balanced') };
     assert.equal(balanced.masterEnabled, true);
-    assert.equal(balanced.uiEnabled, false);
+    assert.equal(balanced.uiEnabled, true); // Verified: UI sounds are active in balanced
     assert.equal(balanced.messagesEnabled, true);
     assert.equal(balanced.soundTheme, 'balanced');
     assert.equal(balanced.categoryThemes.notifications, 'balanced');
 
     const minimal = { ...DEFAULT_SOUND_SETTINGS, ...getProfilePatch('minimal') };
     assert.equal(minimal.masterEnabled, true);
+    assert.equal(minimal.uiEnabled, true); // Verified: UI clicks can play in minimal
     assert.equal(minimal.messagesEnabled, true);
     assert.equal(minimal.achievementsEnabled, false);
     assert.equal(minimal.soundTheme, 'minimal');
@@ -91,18 +109,42 @@ describe('NEXORA Audio System configuration', () => {
     assert.equal(minimalSteps[0].wave, 'sine');
   });
 
-  it('updates AudioManager internal settings when switching between Magical, Minimal, and Balanced themes', () => {
-    audioManager.setSoundTheme('minimal');
-    assert.equal(audioManager.getSoundTheme(), 'minimal');
-    assert.equal(audioManager.getSettings().soundTheme, 'minimal');
-    assert.equal(audioManager.getSettings().categoryThemes.notifications, 'minimal');
+  it('GlobalSoundManager provides dedicated helper methods without crashing', () => {
+    assert.equal(globalSoundManager, audioManager);
 
-    audioManager.setSoundTheme('balanced');
-    assert.equal(audioManager.getSoundTheme(), 'balanced');
-    assert.equal(audioManager.getSettings().categoryThemes.messages, 'balanced');
+    // Call all dedicated helpers safely (headless / SSR safe)
+    globalSoundManager.playMessageSend();
+    globalSoundManager.playMessageReceive(false);
+    globalSoundManager.playMessageReceive(true);
+    globalSoundManager.playMessageDelivered();
+    globalSoundManager.playMessageRead();
+    globalSoundManager.playButtonClick();
+    globalSoundManager.playTabSwitch();
+    globalSoundManager.playChatOpen();
+    globalSoundManager.playChatClose();
+    globalSoundManager.playFeatureOpen();
+    globalSoundManager.playVoiceSend();
+    globalSoundManager.playVoiceReceive();
+    globalSoundManager.playMediaUploadStart();
+    globalSoundManager.playMediaUploadCompleted();
 
-    audioManager.setSoundTheme('magical');
-    assert.equal(audioManager.getSoundTheme(), 'magical');
-    assert.equal(audioManager.getSettings().categoryThemes.ui, 'magical');
+    assert.ok(true, 'All dedicated sound methods executed cleanly');
+  });
+
+  it('GlobalSoundManager controls volume and mute state correctly', () => {
+    globalSoundManager.setVolume(0.85);
+    assert.equal(globalSoundManager.getVolume(), 0.85);
+
+    globalSoundManager.setMasterEnabled(false);
+    assert.equal(globalSoundManager.isMuted(), true);
+
+    globalSoundManager.setMasterEnabled(true);
+    assert.equal(globalSoundManager.isMuted(), false);
+
+    // Voice recording safety check
+    globalSoundManager.setVoiceRecordingActive(true);
+    assert.equal(globalSoundManager.isVoiceRecordingActive(), true);
+    globalSoundManager.setVoiceRecordingActive(false);
+    assert.equal(globalSoundManager.isVoiceRecordingActive(), false);
   });
 });

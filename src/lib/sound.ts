@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
-import { audioManager } from '../audio/AudioManager';
+import { globalSoundManager, audioManager } from '../audio/GlobalSoundManager';
 import type { SoundEventId as UnifiedSoundEventId } from '../audio/SoundRegistry';
 import {
   NEXORA_SOUND_PACKS as UNIFIED_PACKS,
@@ -7,6 +7,7 @@ import {
   type SoundSettings,
 } from '../audio/SoundSettings';
 
+export { globalSoundManager, audioManager };
 export type NexoraSoundPackId = SoundPackId;
 export type SoundEventId = UnifiedSoundEventId;
 
@@ -34,38 +35,54 @@ export function playSound(
   event: SoundEventId,
   options?: { force?: boolean; packOverride?: NexoraSoundPackId }
 ) {
-  audioManager.play(event, options);
+  globalSoundManager.play(event, options);
 }
 
+// Dedicated helpers matching NEXORA sound specification
+export const playMessageSend = () => globalSoundManager.playMessageSend();
+export const playMessageReceive = (isGroup?: boolean) => globalSoundManager.playMessageReceive(isGroup);
+export const playMessageDelivered = () => globalSoundManager.playMessageDelivered();
+export const playMessageRead = () => globalSoundManager.playMessageRead();
+export const playButtonClick = () => globalSoundManager.playButtonClick();
+export const playGlassTouch = () => globalSoundManager.playGlassTouch();
+export const playTabSwitch = () => globalSoundManager.playTabSwitch();
+export const playChatOpen = () => globalSoundManager.playChatOpen();
+export const playChatClose = () => globalSoundManager.playChatClose();
+export const playFeatureOpen = () => globalSoundManager.playFeatureOpen();
+export const playVoiceSend = () => globalSoundManager.playVoiceSend();
+export const playVoiceReceive = () => globalSoundManager.playVoiceReceive();
+export const playMediaUploadStart = () => globalSoundManager.playMediaUploadStart();
+export const playMediaUploadCompleted = () => globalSoundManager.playMediaUploadCompleted();
+
 export function useSoundPrefs() {
-  const [settings, setSettings] = useState<SoundSettings>(() => audioManager.getSettings());
+  const [settings, setSettings] = useState<SoundSettings>(() => globalSoundManager.getSettings());
 
   useEffect(() => {
-    return audioManager.subscribe(setSettings);
+    return globalSoundManager.subscribe(setSettings);
   }, []);
 
   const setSoundEnabled = useCallback((masterEnabled: boolean) => {
-    audioManager.updateSettings({ masterEnabled });
+    globalSoundManager.updateSettings({ masterEnabled });
   }, []);
 
   const setSoundVolume = useCallback((volume: number) => {
-    audioManager.updateSettings({ volume });
+    globalSoundManager.updateSettings({ volume });
   }, []);
 
   const setReadSoundEnabled = useCallback((readSoundEnabled: boolean) => {
-    audioManager.updateSettings({ readSoundEnabled });
+    globalSoundManager.updateSettings({ readSoundEnabled });
   }, []);
 
   const setUiClickEnabled = useCallback((uiEnabled: boolean) => {
-    audioManager.updateSettings({ uiEnabled });
+    globalSoundManager.updateSettings({ uiEnabled });
   }, []);
 
   const setSoundPack = useCallback((soundPack: NexoraSoundPackId) => {
-    audioManager.updateSettings({ soundPack });
+    globalSoundManager.updateSettings({ soundPack });
   }, []);
 
   const previewPack = useCallback((packId: NexoraSoundPackId) => {
-    audioManager.play('notify.friend_accepted', { force: true, packOverride: packId });
+    globalSoundManager.play('notify.friend_accepted', { force: true, packOverride: packId });
   }, []);
 
   return {
