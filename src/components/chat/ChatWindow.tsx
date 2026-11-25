@@ -15,6 +15,7 @@ import {
   Info,
   Lock,
   MoreVertical,
+  Palette,
   Paperclip,
   Pin,
   Reply,
@@ -47,9 +48,21 @@ import {
   type StoredLocalKeyBundle,
 } from '../../lib/crypto';
 import { getSocket } from '../../lib/socket';
-import { globalSoundManager } from '../../audio/GlobalSoundManager';
+import { audioManager, globalSoundManager } from '../../audio/GlobalSoundManager';
 import { formatFullTimestamp, formatRelativeTimestamp } from '../../lib/time';
 import { useVisualPrefs } from '../../lib/theme';
+import {
+  buildBubbleGradientCss,
+  buildBubbleShadowCss,
+  buildChatBackgroundCss,
+  getBubbleInkPalette,
+  getCachedChatTheme,
+  getIncomingBubbleStyle,
+  isBackgroundDark,
+  setCachedChatTheme,
+  type ChatThemeConfig,
+} from '../../lib/chat-theme';
+import { analyzeAudioBlobToWaveform } from '../../lib/waveform';
 import type {
   ConnectionGamesOverview,
   ConversationSummary,
@@ -83,6 +96,8 @@ import { VoiceRecorder } from './VoiceRecorder';
 import { GroupInfoDrawer } from '../group/GroupInfoDrawer';
 import { ConnectionGamesDrawer, type ConnectionGamesTab } from '../games/ConnectionGamesDrawer';
 import { DeepTalkSession } from '../games/DeepTalkSession';
+import { StreakCounter } from '../games/StreakCounter';
+import { ChatThemeModal } from './ChatThemeModal';
 
 interface ChatWindowProps {
   conversation: ConversationSummary;
@@ -143,6 +158,11 @@ export function ChatWindow({
   const [searchQuery, setSearchQuery] = useState('');
   const [showHeaderMenu, setShowHeaderMenu] = useState(false);
   const [showTimerMenu, setShowTimerMenu] = useState(false);
+  const [showThemeModal, setShowThemeModal] = useState(false);
+  const [savingChatTheme, setSavingChatTheme] = useState(false);
+  const [chatTheme, setChatTheme] = useState<ChatThemeConfig | null>(
+    () => conversation.chatTheme ?? getCachedChatTheme(currentUserId, conversation.id)
+  );
   const [showSafetyModal, setShowSafetyModal] = useState(false);
   const [showGroupDrawer, setShowGroupDrawer] = useState(false);
   const [showGamesDrawer, setShowGamesDrawer] = useState(false);
@@ -153,6 +173,15 @@ export function ChatWindow({
   const [showComposerEmoji, setShowComposerEmoji] = useState(false);
   const [lightbox, setLightbox] = useState<{ url: string; mimeType: string; fileName?: string | null } | null>(null);
   const [nowMs, setNowMs] = useState(() => Date.now());
+
+  useEffect(() => {
+    if (conversation.chatTheme !== undefined) {
+      setChatTheme(conversation.chatTheme);
+      setCachedChatTheme(currentUserId, conversation.id, conversation.chatTheme);
+    } else {
+      setChatTheme(getCachedChatTheme(currentUserId, conversation.id));
+    }
+  }, [conversation.id, conversation.chatTheme, currentUserId]);
 
   const [typingUsers, setTypingUsers] = useState<Record<string, boolean>>({});
   const [groupDetails, setGroupDetails] = useState<GroupDetails | null>(null);
@@ -166,6 +195,8 @@ export function ChatWindow({
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const composerInputRef = useRef<HTMLTextAreaElement | null>(null);
   const typingTimeoutRef = useRef<number | null>(null);
+  const remoteTypingTimersRef = useRef<Map<string, number>>(new Map());
+  const lastTypingEmitAtRef = useRef<number>(0);
   const longPressTimerRef = useRef<number | null>(null);
   const longPressStartRef = useRef<{ x: number; y: number; msgId: string } | null>(null);
   const suppressNextCloseRef = useRef<number>(0);
@@ -480,6 +511,14 @@ export function ChatWindow({
   useEffect(() => {
     setMessages([]);
     setLiveArrivalIds(new Set());
+    setTypingUsers({});
+    remoteTypingTimersRef.current.forEach((timerId) => window.clearTimeout(timerId));
+    remoteTypingTimersRef.current.clear();
+    if (typingTimeoutRef.current) {
+      window.clearTimeout(typingTimeoutRef.current);
+      typingTimeoutRef.current = null;
+    }
+    lastTypingEmitAtRef.current = 0;
     sentReceiptIdsRef.current = new Set();
     groupDetailsRef.current = null;
     setReplyTarget(null);
@@ -489,6 +528,9 @@ export function ChatWindow({
     setPressingMsgId(null);
     setShowGroupDrawer(false);
     setShowGamesDrawer(false);
+    setShowThemeModal(false);
+    setShowHeaderMenu(false);
+    setShowTimerMenu(false);
     setGamesOverview(null);
     setDismissedBannerKey(null);
     setShowComposerEmoji(false);
@@ -502,6 +544,17 @@ export function ChatWindow({
     if (conversation.type === 'private' && conversation.peerUser) {
       loadConnectionGames();
     }
+
+    return () => {
+      if (typingTimeoutRef.current) {
+        window.clearTimeout(typingTimeoutRef.current);
+        typingTimeoutRef.current = null;
+        sock?.emit('typing', { conversationId: conversation.id, isTyping: false });
+        sock?.emit('typing:stop', { conversationId: conversation.id });
+      }
+      remoteTypingTimersRef.current.forEach((timerId) => window.clearTimeout(timerId));
+      remoteTypingTimersRef.current.clear();
+    };
   }, [conversation.id]);
 
   useEffect(() => {
@@ -714,9 +767,22 @@ export function ChatWindow({
       }
     };
 
-    const handleTyping = (data: { conversationId: string; userId: string; isTyping: boolean }) => {
+    const handleTyping = (data: { conversationId: string; userId: string; isTyping?: boolean }) => {
       if (data.conversationId !== conversation.id || data.userId === currentUserId) return;
-      setTypingUsers((prev) => ({ ...prev, [data.userId]: data.isTyping }));
+      const isTyping = data.isTyping !== false;
+      const existingTimer = remoteTypingTimersRef.current.get(data.userId);
+      if (existingTimer) {
+        window.clearTimeout(existingTimer);
+        remoteTypingTimersRef.current.delete(data.userId);
+      }
+      setTypingUsers((prev) => ({ ...prev, [data.userId]: isTyping }));
+      if (isTyping) {
+        const expireTimer = window.setTimeout(() => {
+          remoteTypingTimersRef.current.delete(data.userId);
+          setTypingUsers((prev) => ({ ...prev, [data.userId]: false }));
+        }, 3500);
+        remoteTypingTimersRef.current.set(data.userId, expireTimer);
+      }
     };
 
     const handleGroupUpdated = (data: { conversationId: string }) => {
@@ -785,6 +851,19 @@ export function ChatWindow({
       }
     };
 
+    const handleConversationUpdated = (data: {
+      conversationId: string;
+      chatTheme?: ChatThemeConfig | null;
+    }) => {
+      if (data.conversationId !== conversation.id) return;
+      if ('chatTheme' in data) {
+        const nextTheme = data.chatTheme ?? null;
+        setChatTheme(nextTheme);
+        setCachedChatTheme(currentUserId, conversation.id, nextTheme);
+      }
+      onConversationUpdated();
+    };
+
     const handleSocketReconnect = () => {
       sock.emit('conversation:join', conversation.id);
       if (conversation.type === 'private' && conversation.peerUser) {
@@ -799,8 +878,10 @@ export function ChatWindow({
     sock.on('message:reactions', handleReactions);
     sock.on('message:receipt', handleReceipt);
     sock.on('message:read_batch', handleReadBatch);
+    sock.on('typing', handleTyping);
     sock.on('typing:update', handleTyping);
     sock.on('group:updated', handleGroupUpdated);
+    sock.on('conversation:updated', handleConversationUpdated);
     sock.on('connection_game:deep_talk_updated', handleDeepTalkUpdated);
     sock.on('connection_game:daily_challenge_updated', handleDailyChallengeUpdated);
     sock.on('connect', handleSocketReconnect);
@@ -813,8 +894,10 @@ export function ChatWindow({
       sock.off('message:reactions', handleReactions);
       sock.off('message:receipt', handleReceipt);
       sock.off('message:read_batch', handleReadBatch);
+      sock.off('typing', handleTyping);
       sock.off('typing:update', handleTyping);
       sock.off('group:updated', handleGroupUpdated);
+      sock.off('conversation:updated', handleConversationUpdated);
       sock.off('connection_game:deep_talk_updated', handleDeepTalkUpdated);
       sock.off('connection_game:daily_challenge_updated', handleDailyChallengeUpdated);
       sock.off('connect', handleSocketReconnect);
@@ -944,6 +1027,12 @@ export function ChatWindow({
 
     setSending(true);
     setErrorBanner(null);
+    if (typingTimeoutRef.current) {
+      window.clearTimeout(typingTimeoutRef.current);
+      typingTimeoutRef.current = null;
+    }
+    lastTypingEmitAtRef.current = 0;
+    getSocket()?.emit('typing', { conversationId: conversation.id, isTyping: false });
     getSocket()?.emit('typing:stop', { conversationId: conversation.id });
 
     try {
@@ -984,6 +1073,9 @@ export function ChatWindow({
         setReplyTarget(null);
         await sendEncryptedMessage('text', payload);
       }
+    } catch (err) {
+      audioManager.play('message.failed');
+      setErrorBanner(err instanceof Error ? err.message : 'Failed to update message.');
     } finally {
       setSending(false);
     }
@@ -1012,6 +1104,9 @@ export function ChatWindow({
       else if (encResult.mimeType.startsWith('video/')) kind = 'video';
       else if (encResult.mimeType.startsWith('audio/')) kind = 'voice';
 
+      const audioWaveform =
+        kind === 'voice' ? await analyzeAudioBlobToWaveform(file, 32) : undefined;
+
       await sendEncryptedMessage(
         kind,
         {
@@ -1022,12 +1117,13 @@ export function ChatWindow({
           fileName: file.name,
           mimeType: encResult.mimeType,
           originalSize: encResult.originalSize,
+          ...(audioWaveform ? { waveform: audioWaveform } : {}),
         },
         uploadRes.attachmentId
       );
-      audioManager.play('media.upload_success');
+      globalSoundManager.playMediaUploadCompleted();
     } catch (err) {
-      audioManager.play('media.upload_error');
+      globalSoundManager.playMediaUploadError();
       setErrorBanner(err instanceof Error ? err.message : 'Media encryption/upload failed.');
     } finally {
       setUploadProgress(null);
@@ -1127,9 +1223,30 @@ export function ChatWindow({
     setText(val);
     const sock = getSocket();
     if (!sock) return;
-    sock.emit('typing:start', { conversationId: conversation.id });
+
+    if (!val.trim()) {
+      if (typingTimeoutRef.current) {
+        window.clearTimeout(typingTimeoutRef.current);
+        typingTimeoutRef.current = null;
+      }
+      lastTypingEmitAtRef.current = 0;
+      sock.emit('typing', { conversationId: conversation.id, isTyping: false });
+      sock.emit('typing:stop', { conversationId: conversation.id });
+      return;
+    }
+
+    const now = Date.now();
+    if (now - lastTypingEmitAtRef.current > 900) {
+      lastTypingEmitAtRef.current = now;
+      sock.emit('typing', { conversationId: conversation.id, isTyping: true });
+      sock.emit('typing:start', { conversationId: conversation.id });
+    }
+
     if (typingTimeoutRef.current) window.clearTimeout(typingTimeoutRef.current);
     typingTimeoutRef.current = window.setTimeout(() => {
+      typingTimeoutRef.current = null;
+      lastTypingEmitAtRef.current = 0;
+      sock.emit('typing', { conversationId: conversation.id, isTyping: false });
       sock.emit('typing:stop', { conversationId: conversation.id });
     }, 1500);
   };
@@ -1283,60 +1400,113 @@ export function ChatWindow({
 
   const togglePin = async (msg: MessageRecord) => {
     setActiveMenuMsgId(null);
-    await apiRequest(`/api/v1/conversations/messages/${msg.id}`, {
-      method: 'PATCH',
-      body: JSON.stringify({ isPinned: !msg.isPinned }),
-    }).catch(() => {});
+    try {
+      await apiRequest(`/api/v1/conversations/messages/${msg.id}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ isPinned: !msg.isPinned }),
+      });
+    } catch (err) {
+      setErrorBanner(err instanceof Error ? err.message : 'Failed to update pin state.');
+    }
   };
 
   const deleteMessage = async (msgId: string, scope: 'delete_for_me' | 'delete_for_everyone') => {
     setActiveMenuMsgId(null);
-    audioManager.play('message.deleted');
-    await apiRequest(`/api/v1/conversations/messages/${msgId}`, {
-      method: 'PATCH',
-      body: JSON.stringify({ action: scope }),
-    });
-    if (scope === 'delete_for_me') {
-      setMessages((prev) => prev.filter((m) => m.id !== msgId));
+    try {
+      audioManager.play('message.deleted');
+      await apiRequest(`/api/v1/conversations/messages/${msgId}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ action: scope }),
+      });
+      if (scope === 'delete_for_me') {
+        setMessages((prev) => prev.filter((m) => m.id !== msgId));
+      }
+    } catch (err) {
+      setErrorBanner(err instanceof Error ? err.message : 'Failed to delete message.');
     }
   };
 
   const updateDisappearing = async (seconds: number) => {
     setShowTimerMenu(false);
-    audioManager.play('ui.settings_saved');
-    await apiRequest(`/api/v1/conversations/${conversation.id}/settings`, {
-      method: 'PATCH',
-      body: JSON.stringify({ disappearingSeconds: seconds }),
-    });
-    onConversationUpdated();
+    try {
+      audioManager.play('ui.settings_saved');
+      await apiRequest(`/api/v1/conversations/${conversation.id}/settings`, {
+        method: 'PATCH',
+        body: JSON.stringify({ disappearingSeconds: seconds }),
+      });
+      onConversationUpdated();
+    } catch (err) {
+      setErrorBanner(err instanceof Error ? err.message : 'Failed to update disappearing timer.');
+    }
   };
 
   const toggleMuteOrArchive = async (patch: { muted?: boolean; archived?: boolean }) => {
     setShowHeaderMenu(false);
-    audioManager.play('ui.settings_saved');
-    await apiRequest(`/api/v1/conversations/${conversation.id}/settings`, {
-      method: 'PATCH',
-      body: JSON.stringify(patch),
-    });
-    onConversationUpdated();
+    try {
+      audioManager.play('ui.settings_saved');
+      await apiRequest(`/api/v1/conversations/${conversation.id}/settings`, {
+        method: 'PATCH',
+        body: JSON.stringify(patch),
+      });
+      onConversationUpdated();
+    } catch (err) {
+      setErrorBanner(err instanceof Error ? err.message : 'Failed to update conversation settings.');
+    }
+  };
+
+  const saveChatTheme = async (nextTheme: ChatThemeConfig | null) => {
+    const previousTheme = chatTheme;
+    setSavingChatTheme(true);
+    setChatTheme(nextTheme);
+    setCachedChatTheme(currentUserId, conversation.id, nextTheme);
+    try {
+      const res = await apiRequest<{ success: boolean; chatTheme?: ChatThemeConfig | null }>(
+        `/api/v1/conversations/${conversation.id}/settings`,
+        {
+          method: 'PATCH',
+          body: JSON.stringify({ chatTheme: nextTheme }),
+        }
+      );
+      if (res.chatTheme !== undefined) {
+        setChatTheme(res.chatTheme);
+        setCachedChatTheme(currentUserId, conversation.id, res.chatTheme);
+      }
+      audioManager.play('ui.settings_saved');
+      setShowThemeModal(false);
+      onConversationUpdated();
+    } catch (err) {
+      setChatTheme(previousTheme);
+      setCachedChatTheme(currentUserId, conversation.id, previousTheme);
+      setErrorBanner(err instanceof Error ? err.message : 'Failed to update chat theme.');
+    } finally {
+      setSavingChatTheme(false);
+    }
   };
 
   const handleBlockPeer = async () => {
     if (!conversation.peerUser) return;
     setShowHeaderMenu(false);
-    await apiRequest(`/api/v1/users/${conversation.peerUser.id}/block`, { method: 'POST' });
-    onConversationUpdated();
-    onBackMobile?.();
+    try {
+      await apiRequest(`/api/v1/users/${conversation.peerUser.id}/block`, { method: 'POST' });
+      onConversationUpdated();
+      onBackMobile?.();
+    } catch (err) {
+      setErrorBanner(err instanceof Error ? err.message : 'Failed to block user.');
+    }
   };
 
   const handleReportPeer = async () => {
     if (!conversation.peerUser) return;
     setShowHeaderMenu(false);
-    await apiRequest(`/api/v1/users/${conversation.peerUser.id}/report`, {
-      method: 'POST',
-      body: JSON.stringify({ reason: 'Inappropriate behavior' }),
-    });
-    setErrorBanner('Report submitted for review.');
+    try {
+      await apiRequest(`/api/v1/users/${conversation.peerUser.id}/report`, {
+        method: 'POST',
+        body: JSON.stringify({ reason: 'Inappropriate behavior' }),
+      });
+      setErrorBanner('Report submitted for review.');
+    } catch (err) {
+      setErrorBanner(err instanceof Error ? err.message : 'Failed to submit report.');
+    }
   };
 
   const pinnedMessages = useMemo(() => messages.filter((m) => m.isPinned && !m.deletedForEveryone), [messages]);
@@ -1346,9 +1516,46 @@ export function ChatWindow({
     return messages.filter((m) => (m.localDecrypted?.text || '').toLowerCase().includes(q));
   }, [messages, showSearch, searchQuery]);
 
-  const activeTyping = Object.values(typingUsers).some(Boolean);
+  const activeTypingUserIds = useMemo(
+    () =>
+      Object.entries(typingUsers)
+        .filter(([, isTyping]) => Boolean(isTyping))
+        .map(([uid]) => uid),
+    [typingUsers]
+  );
+  const activeTyping = activeTypingUserIds.length > 0;
+  const typingStatusLabel = useMemo(() => {
+    if (!activeTyping) return '';
+    if (conversation.type === 'private') {
+      const peerName = conversation.peerUser?.displayName || conversation.title || 'User';
+      return `${peerName} is typing...`;
+    }
+    const names = activeTypingUserIds.map((uid) => {
+      const member = groupDetails?.members.find((m) => m.userId === uid);
+      return member?.displayName || 'User';
+    });
+    if (names.length === 1) return `${names[0]} is typing...`;
+    if (names.length === 2) return `${names[0]} and ${names[1]} are typing...`;
+    return `${names.length} people are typing...`;
+  }, [activeTyping, activeTypingUserIds, conversation.peerUser?.displayName, conversation.title, conversation.type, groupDetails?.members]);
   const timerLabel =
     DISAPPEARING_OPTIONS.find((o) => o.seconds === conversation.disappearingSeconds)?.label || 'Off';
+
+  const bubbleInk = useMemo(
+    () =>
+      chatTheme
+        ? getBubbleInkPalette(chatTheme.outgoingBubbleStart, chatTheme.outgoingBubbleEnd)
+        : null,
+    [chatTheme]
+  );
+  const customBgIsDark = useMemo(
+    () => (chatTheme ? isBackgroundDark(chatTheme) : null),
+    [chatTheme]
+  );
+  const incomingCustomStyle = useMemo(
+    () => (chatTheme ? getIncomingBubbleStyle(chatTheme.incomingBubbleTint) : {}),
+    [chatTheme]
+  );
 
   const hasGamesAttention = Boolean(
     gamesOverview &&
@@ -1418,7 +1625,12 @@ export function ChatWindow({
       transition={{ duration: prefersReducedMotion ? 0 : 0.28, ease: [0.16, 1, 0.3, 1] }}
       className="flex h-full w-full overflow-hidden relative"
     >
-      <div className="flex-1 flex flex-col h-full min-w-0">
+      <div
+        data-testid="chat-window-surface"
+        data-chat-theme={chatTheme ? chatTheme.presetId : 'global'}
+        className="flex-1 flex flex-col h-full min-w-0 relative transition-[background] duration-300"
+        style={chatTheme ? { background: buildChatBackgroundCss(chatTheme) } : undefined}
+      >
         {/* Floating Liquid Glass Chat Header */}
         <header className="relative z-20 md:mx-4 md:mt-3 md:rounded-[24px] nexora-glass border-x-0 md:border-x border-t-0 md:border-t px-3 sm:px-5 py-3 pt-safe flex items-center justify-between gap-3 shrink-0">
           <div className="flex items-center gap-2.5 min-w-0 relative z-10">
@@ -1447,7 +1659,9 @@ export function ChatWindow({
               </div>
               <div className="text-xs text-[var(--nx-text-secondary)] truncate flex items-center gap-1.5">
                 {activeTyping ? (
-                  <span className="text-violet-600 dark:text-cyan-300 font-medium">Typing...</span>
+                  <span className="text-violet-600 dark:text-cyan-300 font-medium">
+                    {typingStatusLabel}
+                  </span>
                 ) : (
                   <>
                     <span>{conversation.subtitle}</span>
@@ -1595,6 +1809,24 @@ export function ChatWindow({
               </button>
             )}
 
+            <button
+              type="button"
+              onClick={() => {
+                audioManager.play('ui.glass_open');
+                setShowThemeModal(true);
+              }}
+              title="Customize chat theme & gradients"
+              aria-label="Customize chat theme"
+              data-testid="open-chat-theme-btn"
+              className={`min-h-[40px] min-w-[40px] rounded-xl flex items-center justify-center transition-colors cursor-pointer ${
+                chatTheme
+                  ? 'bg-violet-500/20 text-violet-700 dark:text-cyan-300'
+                  : 'text-[var(--nx-text-secondary)] hover:text-[var(--nx-text-primary)] hover:bg-[var(--nx-surface-hover)]'
+              }`}
+            >
+              <Palette className="w-4 h-4" />
+            </button>
+
             <div className="relative">
               <button
                 type="button"
@@ -1609,7 +1841,19 @@ export function ChatWindow({
               </button>
 
               {showHeaderMenu && (
-                <div className="absolute right-0 mt-2 w-48 nexora-glass-elevated rounded-2xl p-1.5 shadow-2xl z-30 space-y-0.5 text-xs">
+                <div className="absolute right-0 mt-2 w-52 nexora-glass-elevated rounded-2xl p-1.5 shadow-2xl z-30 space-y-0.5 text-xs">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setShowHeaderMenu(false);
+                      audioManager.play('ui.glass_open');
+                      setShowThemeModal(true);
+                    }}
+                    className="w-full flex items-center gap-2 px-3 py-2 rounded-lg text-[var(--nx-text-primary)] hover:bg-[var(--nx-surface-hover)] cursor-pointer"
+                  >
+                    <Palette className="w-3.5 h-3.5 text-violet-600 dark:text-cyan-300" />
+                    <span>Chat theme & gradients</span>
+                  </button>
                   <button
                     type="button"
                     onClick={() => toggleMuteOrArchive({ muted: !conversation.muted })}
@@ -1718,53 +1962,109 @@ export function ChatWindow({
             </div>
           )}
 
-        {/* Active Daily Connection Challenge Banner */}
-        {gamesBanner && dismissedBannerKey !== gamesBanner.key && !showGamesDrawer && (
-          <div className="mx-3 sm:mx-4 mt-2 rounded-[18px] nexora-glass-subtle border border-violet-400/30 dark:border-cyan-400/25 px-3.5 py-2.5 flex items-center justify-between gap-3 shadow-[0_8px_22px_rgba(104,72,240,0.12)]">
-            <button
-              type="button"
-              onClick={() => {
-                audioManager.play('ui.glass_open');
-                setGamesTab(gamesBanner.tab);
-                setShowGamesDrawer(true);
-              }}
-              className="flex items-center gap-2.5 min-w-0 flex-1 text-left cursor-pointer"
+        {/* Real-time peer typing status banner at the top of the chat area */}
+        <AnimatePresence>
+          {activeTyping && (
+            <motion.div
+              key="top-typing-status"
+              data-testid="top-typing-indicator"
+              initial={prefersReducedMotion ? false : { opacity: 0, y: -6 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={prefersReducedMotion ? undefined : { opacity: 0, y: -4 }}
+              transition={{ duration: prefersReducedMotion ? 0 : 0.18, ease: [0.16, 1, 0.3, 1] }}
+              className="mx-3 sm:mx-4 mt-2 px-3.5 py-1.5 rounded-[14px] nexora-glass-subtle border border-violet-400/25 dark:border-cyan-400/25 flex items-center gap-2 text-xs text-violet-700 dark:text-cyan-300"
+              aria-live="polite"
             >
-              <div className="w-8 h-8 rounded-xl bg-gradient-to-br from-violet-500/25 to-cyan-400/25 flex items-center justify-center shrink-0">
-                <Sparkles className="w-4 h-4 text-violet-600 dark:text-cyan-300" />
-              </div>
-              <div className="min-w-0">
-                <div className="text-[11px] font-semibold text-violet-700 dark:text-cyan-300 truncate">
-                  {gamesBanner.label}
+              <span className="inline-flex items-center gap-1 shrink-0" aria-hidden="true">
+                {[0, 1, 2].map((dot) => (
+                  <motion.span
+                    key={dot}
+                    animate={
+                      prefersReducedMotion
+                        ? undefined
+                        : { y: [0, -3, 0], opacity: [0.45, 1, 0.45] }
+                    }
+                    transition={{
+                      duration: 0.85,
+                      repeat: Infinity,
+                      delay: dot * 0.15,
+                      ease: 'easeInOut',
+                    }}
+                    className="w-1.5 h-1.5 rounded-full bg-violet-500 dark:bg-cyan-300"
+                  />
+                ))}
+              </span>
+              <span className="font-medium truncate">{typingStatusLabel}</span>
+            </motion.div>
+          )}
+        </AnimatePresence>
+
+        {/* Daily Connection Streak & Challenge Banner */}
+        {!showGamesDrawer &&
+          conversation.type === 'private' &&
+          conversation.peerUser &&
+          (gamesOverview?.connectionStreak || (gamesBanner && dismissedBannerKey !== gamesBanner.key)) && (
+            <div className="mx-3 sm:mx-4 mt-2 space-y-2">
+              {gamesOverview?.connectionStreak && (
+                <StreakCounter
+                  connectionStreak={gamesOverview.connectionStreak}
+                  variant="compact"
+                  onClick={() => {
+                    audioManager.play('ui.glass_open');
+                    setGamesTab('daily-challenge');
+                    setShowGamesDrawer(true);
+                  }}
+                />
+              )}
+
+              {gamesBanner && dismissedBannerKey !== gamesBanner.key && (
+                <div className="rounded-[18px] nexora-glass-subtle border border-violet-400/30 dark:border-cyan-400/25 px-3.5 py-2.5 flex items-center justify-between gap-3 shadow-[0_8px_22px_rgba(104,72,240,0.12)]">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      audioManager.play('ui.glass_open');
+                      setGamesTab(gamesBanner.tab);
+                      setShowGamesDrawer(true);
+                    }}
+                    className="flex items-center gap-2.5 min-w-0 flex-1 text-left cursor-pointer"
+                  >
+                    <div className="w-8 h-8 rounded-xl bg-gradient-to-br from-violet-500/25 to-cyan-400/25 flex items-center justify-center shrink-0">
+                      <Sparkles className="w-4 h-4 text-violet-600 dark:text-cyan-300" />
+                    </div>
+                    <div className="min-w-0">
+                      <div className="text-[11px] font-semibold text-violet-700 dark:text-cyan-300 truncate">
+                        {gamesBanner.label}
+                      </div>
+                      <div className="text-xs text-[var(--nx-text-primary)] truncate">
+                        {gamesBanner.text}
+                      </div>
+                    </div>
+                  </button>
+                  <div className="flex items-center gap-1.5 shrink-0">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        audioManager.play('ui.glass_open');
+                        setGamesTab(gamesBanner.tab);
+                        setShowGamesDrawer(true);
+                      }}
+                      className="min-h-[34px] px-3 rounded-xl bg-gradient-to-br from-[#7c5cf6] to-[#566ee6] text-white text-xs font-medium cursor-pointer"
+                    >
+                      {gamesBanner.cta}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setDismissedBannerKey(gamesBanner.key)}
+                      aria-label="Dismiss Connection Game notice"
+                      className="p-1.5 rounded-lg text-[var(--nx-text-muted)] hover:text-[var(--nx-text-primary)] cursor-pointer"
+                    >
+                      <X className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
                 </div>
-                <div className="text-xs text-[var(--nx-text-primary)] truncate">
-                  {gamesBanner.text}
-                </div>
-              </div>
-            </button>
-            <div className="flex items-center gap-1.5 shrink-0">
-              <button
-                type="button"
-                onClick={() => {
-                  audioManager.play('ui.glass_open');
-                  setGamesTab(gamesBanner.tab);
-                  setShowGamesDrawer(true);
-                }}
-                className="min-h-[34px] px-3 rounded-xl bg-gradient-to-br from-[#7c5cf6] to-[#566ee6] text-white text-xs font-medium cursor-pointer"
-              >
-                {gamesBanner.cta}
-              </button>
-              <button
-                type="button"
-                onClick={() => setDismissedBannerKey(gamesBanner.key)}
-                aria-label="Dismiss Connection Game notice"
-                className="p-1.5 rounded-lg text-[var(--nx-text-muted)] hover:text-[var(--nx-text-primary)] cursor-pointer"
-              >
-                <X className="w-3.5 h-3.5" />
-              </button>
+              )}
             </div>
-          </div>
-        )}
+          )}
 
         {errorBanner && (
           <div className="mx-4 mt-2 rounded-xl bg-rose-500/12 border border-rose-500/30 px-3 py-2 text-xs text-rose-700 dark:text-rose-200 flex items-center justify-between">
@@ -1807,11 +2107,45 @@ export function ChatWindow({
                     transition={{ duration: 0.2 }}
                     className="h-full flex flex-col items-center justify-center text-center py-12 space-y-3"
                   >
-                    <div className="w-12 h-12 rounded-2xl nexora-glass-subtle flex items-center justify-center">
-                      <Lock className="w-5 h-5 text-violet-600 dark:text-violet-300" />
+                    <div
+                      className={`w-12 h-12 rounded-2xl flex items-center justify-center border ${
+                        customBgIsDark === null
+                          ? 'nexora-glass-subtle border-transparent'
+                          : customBgIsDark
+                          ? 'bg-white/10 border-white/20 backdrop-blur-md'
+                          : 'bg-white/75 border-white/85 backdrop-blur-md'
+                      }`}
+                    >
+                      <Lock
+                        className={`w-5 h-5 ${
+                          customBgIsDark === null
+                            ? 'text-violet-600 dark:text-violet-300'
+                            : customBgIsDark
+                            ? 'text-violet-200'
+                            : 'text-violet-700'
+                        }`}
+                      />
                     </div>
-                    <div className="text-sm font-medium text-[var(--nx-text-primary)]">End-to-end encrypted channel ready</div>
-                    <p className="text-xs text-[var(--nx-text-secondary)] max-w-xs leading-relaxed">
+                    <div
+                      className={`text-sm font-medium ${
+                        customBgIsDark === null
+                          ? 'text-[var(--nx-text-primary)]'
+                          : customBgIsDark
+                          ? 'text-white'
+                          : 'text-slate-900'
+                      }`}
+                    >
+                      End-to-end encrypted channel ready
+                    </div>
+                    <p
+                      className={`text-xs max-w-xs leading-relaxed ${
+                        customBgIsDark === null
+                          ? 'text-[var(--nx-text-secondary)]'
+                          : customBgIsDark
+                          ? 'text-slate-200/85'
+                          : 'text-slate-700'
+                      }`}
+                    >
                       Messages, photos, videos, and voice notes are encrypted on your device with AES-256-GCM before leaving your browser.
                     </p>
                   </motion.div>
@@ -1880,7 +2214,15 @@ export function ChatWindow({
                       }`}
                     >
                       {conversation.type === 'group' && !isMine && isFirstInGroup && (
-                        <span className="text-[11px] text-[var(--nx-text-secondary)] ml-1 mb-1 font-medium">
+                        <span
+                          className={`text-[11px] ml-1 mb-1 font-medium ${
+                            customBgIsDark === null
+                              ? 'text-[var(--nx-text-secondary)]'
+                              : customBgIsDark
+                              ? 'text-white/80'
+                              : 'text-slate-800/80'
+                          }`}
+                        >
                           @{msg.senderUsername}
                         </span>
                       )}
@@ -1948,6 +2290,24 @@ export function ChatWindow({
                           isFirstInGroup={isFirstInGroup}
                           isLastInGroup={isLastInGroup}
                           data-cursor-interactive={msg.deletedForEveryone ? undefined : 'true'}
+                          style={
+                            !msg.deletedForEveryone && chatTheme
+                              ? isMine && bubbleInk
+                                ? {
+                                    background: buildBubbleGradientCss(chatTheme),
+                                    color: bubbleInk.textColor,
+                                    borderColor: bubbleInk.borderColor,
+                                    boxShadow: buildBubbleShadowCss(chatTheme),
+                                  }
+                                : !isMine && incomingCustomStyle.background
+                                ? {
+                                    background: incomingCustomStyle.background,
+                                    borderColor: incomingCustomStyle.borderColor,
+                                    color: incomingCustomStyle.color,
+                                  }
+                                : undefined
+                              : undefined
+                          }
                           onPointerDown={(e) => handleBubblePointerDown(e, msg)}
                           onPointerMove={handleBubblePointerMove}
                           onPointerUp={cancelLongPress}
@@ -1995,9 +2355,20 @@ export function ChatWindow({
                         <div
                           className={`mb-2 px-2.5 py-1.5 rounded-lg border text-xs ${
                             isMine
-                              ? 'bg-black/20 border-white/20 text-white'
+                              ? bubbleInk
+                                ? ''
+                                : 'bg-black/20 border-white/20 text-white'
                               : 'bg-white/50 dark:bg-black/25 border-white/60 dark:border-white/10'
                           }`}
+                          style={
+                            isMine && bubbleInk
+                              ? {
+                                  backgroundColor: bubbleInk.subSurfaceBg,
+                                  borderColor: bubbleInk.borderColor,
+                                  color: bubbleInk.textColor,
+                                }
+                              : undefined
+                          }
                         >
                           <div className="font-medium opacity-90">{dec.replySenderName || 'Reply'}</div>
                           <div className="opacity-75 truncate max-w-[220px]">{dec.replyPreview}</div>
@@ -2014,6 +2385,7 @@ export function ChatWindow({
                               kind={msg.kind}
                               payload={dec}
                               isMine={isMine}
+                              isLightBubble={Boolean(isMine && bubbleInk?.isLightSurface)}
                               onOpenLightbox={(url, mimeType, fileName) => {
                                 audioManager.play('media.preview_open');
                                 setLightbox({ url, mimeType, fileName });
@@ -2024,13 +2396,21 @@ export function ChatWindow({
                         </div>
                       )}
 
-                      <div className="mt-1.5 flex items-center justify-end gap-1.5 text-[10px] opacity-80 font-mono-tabular">
+                      <div
+                        className="mt-1.5 flex items-center justify-end gap-1.5 text-[10px] opacity-80 font-mono-tabular"
+                        style={isMine && bubbleInk ? { color: bubbleInk.mutedTextColor, opacity: 1 } : undefined}
+                      >
                         {msg.isPinned && <Pin className="w-2.5 h-2.5" />}
                         {msg.expiresAt && (
                           <Timer
                             className={`w-2.5 h-2.5 ${
-                              isMine ? 'text-cyan-200' : 'text-sky-600 dark:text-cyan-300'
+                              isMine
+                                ? bubbleInk
+                                  ? ''
+                                  : 'text-cyan-200'
+                                : 'text-sky-600 dark:text-cyan-300'
                             }`}
+                            style={isMine && bubbleInk ? { color: bubbleInk.accentColor } : undefined}
                           />
                         )}
                         {msg.isEdited && <span>Edited</span>}
@@ -2072,9 +2452,17 @@ export function ChatWindow({
                             }
                           >
                             {msg.status === 'sending' && <Clock className="w-3 h-3" />}
-                            {msg.status === 'sent' && <Check className="w-3 h-3 text-slate-200/80" />}
+                            {msg.status === 'sent' && (
+                              <Check
+                                className={`w-3 h-3 ${bubbleInk ? '' : 'text-slate-200/80'}`}
+                                style={bubbleInk ? { color: bubbleInk.checkSentColor } : undefined}
+                              />
+                            )}
                             {msg.status === 'delivered' && (
-                              <CheckCheck className="w-3.5 h-3.5 text-slate-200/85" />
+                              <CheckCheck
+                                className={`w-3.5 h-3.5 ${bubbleInk ? '' : 'text-slate-200/85'}`}
+                                style={bubbleInk ? { color: bubbleInk.checkSentColor } : undefined}
+                              />
                             )}
                             {msg.status === 'read' && (
                               <motion.span
@@ -2084,11 +2472,12 @@ export function ChatWindow({
                                 className="inline-flex items-center"
                               >
                                 <CheckCheck
-                                  className={`w-3.5 h-3.5 text-cyan-300 ${
+                                  className={`w-3.5 h-3.5 ${bubbleInk ? '' : 'text-cyan-300'} ${
                                     msg.verifiedRead
                                       ? 'drop-shadow-[0_0_6px_rgba(34,211,238,0.7)]'
                                       : ''
                                   }`}
+                                  style={bubbleInk ? { color: bubbleInk.checkReadColor } : undefined}
                                 />
                               </motion.span>
                             )}
@@ -2102,7 +2491,13 @@ export function ChatWindow({
                       dateTime={msg.createdAt}
                       title={formatFullTimestamp(msg.createdAt)}
                       data-testid="message-relative-time"
-                      className="text-[10px] text-[var(--nx-text-muted)] whitespace-nowrap shrink-0 pb-1 font-mono-tabular select-none"
+                      className={`text-[10px] whitespace-nowrap shrink-0 pb-1 font-mono-tabular select-none ${
+                        customBgIsDark === null
+                          ? 'text-[var(--nx-text-muted)]'
+                          : customBgIsDark
+                          ? 'text-white/75'
+                          : 'text-slate-800/75'
+                      }`}
                     >
                       {formatRelativeTimestamp(msg.createdAt, nowMs)}
                     </time>
@@ -2276,7 +2671,17 @@ export function ChatWindow({
                     }
                     className="flex items-start"
                   >
-                    <div className="rounded-2xl px-3.5 py-2.5 nexora-glass-bubble-in inline-flex items-center gap-1.5">
+                    <div
+                      className="rounded-2xl px-3.5 py-2.5 nexora-glass-bubble-in inline-flex items-center gap-1.5"
+                      style={
+                        chatTheme && incomingCustomStyle.background
+                          ? {
+                              background: incomingCustomStyle.background,
+                              borderColor: incomingCustomStyle.borderColor,
+                            }
+                          : undefined
+                      }
+                    >
                       {[0, 1, 2].map((dot) => (
                         <motion.span
                           key={dot}
@@ -2468,7 +2873,20 @@ export function ChatWindow({
                     disabled={sending}
                     whileTap={prefersReducedMotion ? undefined : { scale: 0.92 }}
                     aria-label="Send encrypted message"
-                    className="relative z-10 min-h-[40px] px-4 rounded-full bg-gradient-to-br from-[#7c5cf6] to-[#566ee6] hover:from-[#896cf8] hover:to-[#667deb] disabled:opacity-50 text-white text-xs font-medium inline-flex items-center gap-1.5 shadow-[inset_0_1px_0_rgba(255,255,255,0.25),0_6px_16px_rgba(88,80,236,0.3)] transition-all cursor-pointer"
+                    className={`relative z-10 min-h-[40px] px-4 rounded-full disabled:opacity-50 text-xs font-medium inline-flex items-center gap-1.5 transition-all cursor-pointer ${
+                      chatTheme
+                        ? ''
+                        : 'bg-gradient-to-br from-[#7c5cf6] to-[#566ee6] hover:from-[#896cf8] hover:to-[#667deb] text-white shadow-[inset_0_1px_0_rgba(255,255,255,0.25),0_6px_16px_rgba(88,80,236,0.3)]'
+                    }`}
+                    style={
+                      chatTheme && bubbleInk
+                        ? {
+                            background: buildBubbleGradientCss(chatTheme),
+                            color: bubbleInk.textColor,
+                            boxShadow: buildBubbleShadowCss(chatTheme),
+                          }
+                        : undefined
+                    }
                   >
                     <Send className="w-3.5 h-3.5" />
                     <span className="hidden sm:inline">{editTarget ? 'Save' : 'Send'}</span>
@@ -2550,6 +2968,18 @@ export function ChatWindow({
           onClose={() => setForwardTarget(null)}
         />
       )}
+
+      <AnimatePresence>
+        {showThemeModal && (
+          <ChatThemeModal
+            conversationTitle={conversation.title}
+            initialTheme={chatTheme}
+            saving={savingChatTheme}
+            onSave={saveChatTheme}
+            onClose={() => setShowThemeModal(false)}
+          />
+        )}
+      </AnimatePresence>
     </motion.div>
   );
 }

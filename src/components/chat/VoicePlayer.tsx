@@ -3,19 +3,28 @@ import { motion } from 'motion/react';
 import { Pause, Play } from 'lucide-react';
 import { audioManager } from '../../audio/AudioManager';
 import { useVisualPrefs } from '../../lib/theme';
-import { analyzeAudioUrlToWaveform } from '../../lib/waveform';
+import { analyzeAudioBlobToWaveform, analyzeAudioUrlToWaveform } from '../../lib/waveform';
 import { CanvasWaveform } from './CanvasWaveform';
 
 interface VoicePlayerProps {
   audioUrl: string;
+  audioBlob?: Blob | null;
   durationMs?: number | null;
   waveform?: number[] | null;
   isMine?: boolean;
+  isLightBubble?: boolean;
 }
 
 const SPEEDS = [1, 1.5, 2] as const;
 
-export function VoicePlayer({ audioUrl, durationMs, waveform, isMine }: VoicePlayerProps) {
+export function VoicePlayer({
+  audioUrl,
+  audioBlob,
+  durationMs,
+  waveform,
+  isMine,
+  isLightBubble = false,
+}: VoicePlayerProps) {
   const { effectiveReducedMotion } = useVisualPrefs();
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const [playing, setPlaying] = useState(false);
@@ -24,16 +33,24 @@ export function VoicePlayer({ audioUrl, durationMs, waveform, isMine }: VoicePla
   const [totalSec, setTotalSec] = useState(durationMs ? Math.round(durationMs / 1000) : 0);
   const [speedIdx, setSpeedIdx] = useState(0);
   const [resolvedWaveform, setResolvedWaveform] = useState<number[]>(
-    waveform && waveform.length > 0 ? waveform : Array(28).fill(0.35)
+    waveform && waveform.length > 0 ? waveform : Array(32).fill(0.28)
   );
 
   useEffect(() => {
-    if (waveform && waveform.length > 0) {
+    const hasCustomWaveform =
+      Boolean(waveform && waveform.length > 0) &&
+      !waveform!.every((v) => Math.abs(v - waveform![0]) < 0.01);
+    if (hasCustomWaveform && waveform) {
       setResolvedWaveform(waveform);
       return;
     }
+
     let active = true;
-    analyzeAudioUrlToWaveform(audioUrl, 32).then((analyzed) => {
+    const decodePromise = audioBlob
+      ? analyzeAudioBlobToWaveform(audioBlob, 32)
+      : analyzeAudioUrlToWaveform(audioUrl, 32);
+
+    decodePromise.then((analyzed) => {
       if (active && analyzed && analyzed.length > 0) {
         setResolvedWaveform(analyzed);
       }
@@ -41,7 +58,7 @@ export function VoicePlayer({ audioUrl, durationMs, waveform, isMine }: VoicePla
     return () => {
       active = false;
     };
-  }, [audioUrl, waveform]);
+  }, [audioUrl, audioBlob, waveform]);
 
   useEffect(() => {
     const audio = new Audio(audioUrl);
@@ -123,7 +140,9 @@ export function VoicePlayer({ audioUrl, durationMs, waveform, isMine }: VoicePla
           aria-label={playing ? 'Pause voice message' : 'Play voice message'}
           className={`relative z-10 w-9 h-9 rounded-full flex items-center justify-center transition-colors cursor-pointer ${
             isMine
-              ? 'bg-white/25 hover:bg-white/35 text-white'
+              ? isLightBubble
+                ? 'bg-slate-900/12 hover:bg-slate-900/20 text-slate-900'
+                : 'bg-white/25 hover:bg-white/35 text-white'
               : 'bg-violet-600/20 hover:bg-violet-600/35 dark:bg-violet-600/35 dark:hover:bg-violet-600/55 text-violet-700 dark:text-cyan-200'
           }`}
         >
@@ -136,6 +155,7 @@ export function VoicePlayer({ audioUrl, durationMs, waveform, isMine }: VoicePla
           waveform={resolvedWaveform}
           progress={progress}
           isMine={isMine}
+          isLightBubble={isLightBubble}
           onSeek={seekToRatio}
         />
         <div className="flex items-center justify-between text-[11px] font-mono-tabular opacity-85">

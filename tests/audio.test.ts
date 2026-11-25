@@ -147,4 +147,25 @@ describe('NEXORA Audio System & GlobalSoundManager', () => {
     globalSoundManager.setVoiceRecordingActive(false);
     assert.equal(globalSoundManager.isVoiceRecordingActive(), false);
   });
+
+  it('provides accurate audio diagnostics snapshot and playDiagnostic blocking reasons', async () => {
+    globalSoundManager.resetDiagnosticsState();
+    globalSoundManager.setMasterEnabled(false);
+    const mutedSnap = globalSoundManager.getDiagnostics();
+    assert.equal(mutedSnap.isMuted, true);
+    assert.equal(mutedSnap.totalRegisteredSounds, Object.keys(SOUND_REGISTRY).length);
+    assert.equal(mutedSnap.targetGainValue, 0);
+
+    const blockedRes = await globalSoundManager.playDiagnostic('message.send', { bypassFilters: false });
+    assert.equal(blockedRes.played, false);
+    assert.equal(blockedRes.reason, 'muted');
+
+    globalSoundManager.setMasterEnabled(true);
+    globalSoundManager.setVolume(0.5);
+    const activeSnap = globalSoundManager.getDiagnostics();
+    assert.equal(activeSnap.isMuted, false);
+    assert.equal(activeSnap.effectiveVolume, 0.5);
+    assert.equal(activeSnap.targetGainValue, 0.225);
+    assert.equal(globalSoundManager.getEventBlockingReason('message.send'), null);
+  });
 });

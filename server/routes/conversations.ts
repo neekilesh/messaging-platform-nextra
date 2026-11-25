@@ -2,6 +2,7 @@ import crypto from 'node:crypto';
 import { Router } from 'express';
 import { and, asc, count, desc, eq, gt, isNull, lt, ne, or, sql } from 'drizzle-orm';
 import type { PgDatabase } from '../../src/db/index.ts';
+import { ensureDatabaseSchema } from '../../src/db/ensure-schema.ts';
 import {
   conversationParticipants,
   conversations,
@@ -17,6 +18,11 @@ import {
   privacySettings,
   users,
 } from '../../src/db/schema.ts';
+import {
+  parseChatThemeJson,
+  sanitizeChatTheme,
+  type ChatThemeConfig,
+} from '../../src/lib/chat-theme.ts';
 import { createRequireAuth, getIO, getPublicUserById, isBlockedBetween } from '../context.ts';
 import type { AuthedRequest } from '../context.ts';
 import type {
@@ -264,6 +270,7 @@ export function createConversationsRouter(database: PgDatabase) {
 
   router.get('/', requireAuth, async (req: AuthedRequest, res) => {
     try {
+      await ensureDatabaseSchema(database);
       const nowIso = new Date().toISOString();
       const rows = await database
         .select({
@@ -275,6 +282,8 @@ export function createConversationsRouter(database: PgDatabase) {
           muted: conversationParticipants.muted,
           archived: conversationParticipants.archived,
           unreadCount: conversationParticipants.unreadCount,
+          convChatThemeJson: conversations.chatThemeJson,
+          participantChatThemeJson: conversationParticipants.chatThemeJson,
           groupName: groups.name,
           groupDesc: groups.description,
           groupAvatar: groups.avatarUrl,
@@ -373,6 +382,7 @@ export function createConversationsRouter(database: PgDatabase) {
           muted: row.muted === 1,
           archived: row.archived === 1,
           unreadCount: row.unreadCount,
+          chatTheme: parseChatThemeJson(row.convChatThemeJson ?? row.participantChatThemeJson),
           lastMessage,
           lastMessageAt: row.lastMessageAt,
           ...(myEpochEnvelopes ? { myEpochEnvelopes } : {}),
@@ -483,6 +493,7 @@ export function createConversationsRouter(database: PgDatabase) {
 
   router.patch('/:id/settings', requireAuth, async (req: AuthedRequest, res) => {
     try {
+      await ensureDatabaseSchema(database);
       const convId = String(req.params.id);
       const participant = await database
         .select({ id: conversationParticipants.id })
@@ -500,6 +511,62 @@ export function createConversationsRouter(database: PgDatabase) {
 
       const body = req.body || {};
       const nowIso = new Date().toISOString();
+      let updatedChatTheme: ChatThemeConfig | null | undefined;
+
+      if (Object.prototype.hasOwnProperty.call(body, 'chatTheme')) {
+        if (body.chatTheme === null) {
+          updatedChatTheme = null;
+          await database.transaction(async (tx) => {
+            await tx
+              .update(conversations)
+              .set({ chatThemeJson: null, updatedAt: nowIso })
+              .where(eq(conversations.id, convId));
+            await tx
+              .update(conversationParticipants)
+              .set({ chatThemeJson: null })
+              .where(eq(conversationParticipants.conversationId, convId));
+          });
+        } else {
+          const sanitized = sanitizeChatTheme(body.chatTheme);
+          if (!sanitized) {
+            return res.status(400).json({
+              error: 'Invalid chat theme configuration. Please choose valid hex colors.',
+            });
+          }
+          updatedChatTheme = {
+            ...sanitized,
+            updatedAt: nowIso,
+          };
+          const serializedTheme = JSON.stringify(updatedChatTheme);
+          await database.transaction(async (tx) => {
+            await tx
+              .update(conversations)
+              .set({ chatThemeJson: serializedTheme, updatedAt: nowIso })
+              .where(eq(conversations.id, convId));
+            await tx
+              .update(conversationParticipants)
+              .set({ chatThemeJson: serializedTheme })
+              .where(eq(conversationParticipants.conversationId, convId));
+          });
+        }
+
+        const io = getIO();
+        if (io) {
+          const members = await database
+            .select({ userId: conversationParticipants.userId })
+            .from(conversationParticipants)
+            .where(eq(conversationParticipants.conversationId, convId));
+          const payload = {
+            conversationId: convId,
+            chatTheme: updatedChatTheme,
+            updatedByUserId: req.userId!,
+          };
+          io.to(`conv:${convId}`).emit('conversation:updated', payload);
+          for (const m of members) {
+            io.to(`user:${m.userId}`).emit('conversation:updated', payload);
+          }
+        }
+      }
 
       if (typeof body.muted === 'boolean') {
         await database
@@ -539,7 +606,10 @@ export function createConversationsRouter(database: PgDatabase) {
         });
       }
 
-      return res.json({ success: true });
+      return res.json({
+        success: true,
+        ...(updatedChatTheme !== undefined ? { chatTheme: updatedChatTheme } : {}),
+      });
     } catch (error) {
       console.error('conversation settings error:', error);
       return res.status(500).json({ error: 'Failed to update conversation settings.' });

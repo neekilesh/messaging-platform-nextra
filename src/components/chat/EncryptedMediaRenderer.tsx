@@ -12,6 +12,7 @@ interface EncryptedMediaRendererProps {
   kind: MessageKind;
   payload: DecryptedMessagePayload;
   isMine: boolean;
+  isLightBubble?: boolean;
   onOpenLightbox: (url: string, mimeType: string, fileName?: string | null) => void;
 }
 
@@ -20,9 +21,11 @@ export function EncryptedMediaRenderer({
   kind,
   payload,
   isMine,
+  isLightBubble = false,
   onOpenLightbox,
 }: EncryptedMediaRendererProps) {
   const [objectUrl, setObjectUrl] = useState<string | null>(null);
+  const [audioBlob, setAudioBlob] = useState<Blob | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -48,6 +51,7 @@ export function EncryptedMediaRenderer({
         );
         if (!active) return;
         createdUrl = URL.createObjectURL(blob);
+        setAudioBlob(blob);
         setObjectUrl(createdUrl);
         setError(null);
       } catch (err) {
@@ -71,7 +75,11 @@ export function EncryptedMediaRenderer({
 
   if (error || !objectUrl) {
     return (
-      <div className={`text-xs py-1 ${isMine ? 'text-rose-100' : 'text-rose-600 dark:text-rose-300'}`}>
+      <div
+        className={`text-xs py-1 ${
+          isMine ? (isLightBubble ? 'text-rose-700' : 'text-rose-100') : 'text-rose-600 dark:text-rose-300'
+        }`}
+      >
         {error || 'Media unavailable'}
       </div>
     );
@@ -81,9 +89,11 @@ export function EncryptedMediaRenderer({
     return (
       <VoicePlayer
         audioUrl={objectUrl}
+        audioBlob={audioBlob}
         durationMs={payload.durationMs}
         waveform={payload.waveform}
         isMine={isMine}
+        isLightBubble={isLightBubble}
       />
     );
   }
@@ -132,12 +142,16 @@ export function EncryptedMediaRenderer({
       onClick={() => audioManager.play('media.download')}
       className={`flex items-center gap-3 px-3 py-2.5 rounded-xl border transition-colors max-w-xs ${
         isMine
-          ? 'bg-black/20 hover:bg-black/30 border-white/20 text-white'
+          ? isLightBubble
+            ? 'bg-white/55 hover:bg-white/75 border-slate-900/15 text-slate-900'
+            : 'bg-black/20 hover:bg-black/30 border-white/20 text-white'
           : 'bg-white/55 hover:bg-white/80 dark:bg-black/25 dark:hover:bg-black/35 border-white/65 dark:border-white/10 text-[var(--nx-text-primary)]'
       }`}
     >
       <FileText
-        className={`w-5 h-5 shrink-0 ${isMine ? 'text-cyan-200' : 'text-violet-600 dark:text-cyan-300'}`}
+        className={`w-5 h-5 shrink-0 ${
+          isMine ? (isLightBubble ? 'text-indigo-700' : 'text-cyan-200') : 'text-violet-600 dark:text-cyan-300'
+        }`}
       />
       <div className="min-w-0 flex-1">
         <div className="text-xs font-medium truncate">{payload.fileName || 'Document'}</div>

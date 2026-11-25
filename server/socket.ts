@@ -111,8 +111,7 @@ export function setupSocketServer(httpServer: HttpServer, database: PgDatabase):
       }
     });
 
-    socket.on('typing:start', async (payload: { conversationId?: string }) => {
-      const conversationId = payload?.conversationId;
+    const broadcastTypingState = async (conversationId: string | undefined, isTyping: boolean) => {
       if (!conversationId) return;
       try {
         const member = await database
@@ -126,39 +125,28 @@ export function setupSocketServer(httpServer: HttpServer, database: PgDatabase):
           )
           .limit(1);
         if (member.length === 0) return;
-        socket.to(`conv:${conversationId}`).emit('typing:update', {
+        const payload = {
           conversationId,
           userId,
-          isTyping: true,
-        });
+          isTyping,
+        };
+        socket.to(`conv:${conversationId}`).emit('typing:update', payload);
+        socket.to(`conv:${conversationId}`).emit('typing', payload);
       } catch {
         // ignore typing error
       }
+    };
+
+    socket.on('typing', async (payload: { conversationId?: string; isTyping?: boolean }) => {
+      await broadcastTypingState(payload?.conversationId, payload?.isTyping !== false);
+    });
+
+    socket.on('typing:start', async (payload: { conversationId?: string }) => {
+      await broadcastTypingState(payload?.conversationId, true);
     });
 
     socket.on('typing:stop', async (payload: { conversationId?: string }) => {
-      const conversationId = payload?.conversationId;
-      if (!conversationId) return;
-      try {
-        const member = await database
-          .select({ id: conversationParticipants.id })
-          .from(conversationParticipants)
-          .where(
-            and(
-              eq(conversationParticipants.conversationId, conversationId),
-              eq(conversationParticipants.userId, userId)
-            )
-          )
-          .limit(1);
-        if (member.length === 0) return;
-        socket.to(`conv:${conversationId}`).emit('typing:update', {
-          conversationId,
-          userId,
-          isTyping: false,
-        });
-      } catch {
-        // ignore typing error
-      }
+      await broadcastTypingState(payload?.conversationId, false);
     });
 
     socket.on('message:delivered', async (payload: { messageId?: string; conversationId?: string }) => {

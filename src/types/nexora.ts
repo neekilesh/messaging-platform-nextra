@@ -1,3 +1,6 @@
+import type { ChatThemeConfig, IncomingBubbleTint } from '../lib/chat-theme';
+export type { ChatThemeConfig, IncomingBubbleTint };
+
 export type MessageKind = 'text' | 'image' | 'video' | 'voice' | 'file' | 'system';
 
 export type MessageStatus = 'sending' | 'sent' | 'delivered' | 'read' | 'failed';
@@ -219,6 +222,7 @@ export interface ConversationSummary {
   unreadCount: number;
   lastMessage: MessageRecord | null;
   lastMessageAt: string | null;
+  chatTheme?: ChatThemeConfig | null;
   myEpochEnvelopes?: GroupEpochEnvelope[];
 }
 

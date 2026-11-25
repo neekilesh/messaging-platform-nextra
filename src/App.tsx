@@ -111,6 +111,7 @@ export default function App() {
   const [showCreateStory, setShowCreateStory] = useState(false);
   const [storyViewerIndex, setStoryViewerIndex] = useState<number | null>(null);
   const [mapsQuotaExceeded, setMapsQuotaExceeded] = useState(false);
+  const [workspaceError, setWorkspaceError] = useState<string | null>(null);
 
   const switchNavTab = useCallback(
     (next: NavTab) => {
@@ -345,9 +346,16 @@ export default function App() {
 
   const handleAuthenticated = async (authUser: AuthUser, keys: StoredLocalKeyBundle) => {
     globalSoundManager.playSettingsSaved();
+    setWorkspaceError(null);
     setUser(authUser);
     setMyKeys(keys);
-    await loadWorkspaceData(authUser, keys);
+    try {
+      await loadWorkspaceData(authUser, keys);
+    } catch (err) {
+      setWorkspaceError(
+        err instanceof Error ? err.message : 'Unable to load workspace conversations right now.'
+      );
+    }
   };
 
   const handleLogout = async () => {
@@ -358,18 +366,26 @@ export default function App() {
     setUser(null);
     setMyKeys(null);
     setActiveConversationId(null);
+    setWorkspaceError(null);
   };
 
   const handleStartPrivateChat = async (peerUserId: string) => {
     if (!user || !myKeys) return;
-    const res = await apiRequest<{ conversationId: string }>('/api/v1/conversations/private', {
-      method: 'POST',
-      body: JSON.stringify({ userId: peerUserId }),
-    });
-    await loadWorkspaceData(user, myKeys);
-    setNavTab('chats');
-    setChatFilter('all');
-    setActiveConversationId(res.conversationId);
+    setWorkspaceError(null);
+    try {
+      const res = await apiRequest<{ conversationId: string }>('/api/v1/conversations/private', {
+        method: 'POST',
+        body: JSON.stringify({ userId: peerUserId }),
+      });
+      await loadWorkspaceData(user, myKeys);
+      setNavTab('chats');
+      setChatFilter('all');
+      setActiveConversationId(res.conversationId);
+    } catch (err) {
+      setWorkspaceError(
+        err instanceof Error ? err.message : 'Unable to start private conversation.'
+      );
+    }
   };
 
   if (booting) {
@@ -417,6 +433,22 @@ export default function App() {
     <div className="h-screen w-screen overflow-hidden nexora-cosmos flex flex-col md:flex-row relative">
       <CosmicBackdrop />
       <ConnectionStatusBanner isOnline={isOnline} socketStatus={socketStatus} />
+
+      {workspaceError && (
+        <div
+          role="alert"
+          className="fixed top-3 left-1/2 -translate-x-1/2 w-[94%] max-w-xl z-50 nexora-glass-elevated rounded-2xl border border-rose-500/40 bg-rose-500/12 px-4 py-2.5 flex items-center justify-between gap-3 text-xs text-rose-700 dark:text-rose-200"
+        >
+          <span className="truncate">{workspaceError}</span>
+          <button
+            type="button"
+            onClick={() => setWorkspaceError(null)}
+            className="font-semibold hover:underline cursor-pointer shrink-0"
+          >
+            Dismiss
+          </button>
+        </div>
+      )}
 
       {mapsQuotaExceeded && (
         <div

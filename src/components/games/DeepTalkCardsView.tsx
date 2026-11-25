@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import { motion } from 'motion/react';
 import {
   Layers,
   Plus,
@@ -10,6 +11,7 @@ import { audioManager } from '../../audio/AudioManager';
 import { apiRequest } from '../../lib/api';
 import { decryptDeepTalkSession } from '../../lib/connection-games-crypto';
 import type { StoredLocalKeyBundle } from '../../lib/crypto';
+import { useVisualPrefs } from '../../lib/theme';
 import type {
   DeepTalkCategory,
   DeepTalkSession as DeepTalkSessionData,
@@ -54,6 +56,7 @@ export function DeepTalkCardsView({
   onDiscussInChat,
   onRefreshOverview,
 }: DeepTalkCardsViewProps) {
+  const { effectiveReducedMotion: prefersReducedMotion } = useVisualPrefs();
   const [selectedCategory, setSelectedCategory] = useState<string>('random');
   const [selectedLimit, setSelectedLimit] = useState<5 | 10 | 15 | null>(5);
   const [busy, setBusy] = useState(false);
@@ -117,7 +120,16 @@ export function DeepTalkCardsView({
   };
 
   return (
-    <div className="space-y-4">
+    <motion.div
+      initial={prefersReducedMotion ? false : { opacity: 0, y: 16, scale: 0.96, filter: 'blur(8px)' }}
+      animate={{ opacity: 1, y: 0, scale: 1, filter: 'blur(0px)' }}
+      transition={
+        prefersReducedMotion
+          ? { duration: 0 }
+          : { type: 'spring', stiffness: 280, damping: 24 }
+      }
+      className="space-y-4"
+    >
       {error && (
         <div className="rounded-[16px] bg-rose-500/12 border border-rose-500/30 px-3.5 py-2.5 text-xs text-rose-700 dark:text-rose-200 flex items-center justify-between gap-2">
           <span>{error}</span>
@@ -146,7 +158,25 @@ export function DeepTalkCardsView({
 
       {/* Start New Deep Talk Session (when no live invited/active/paused session) */}
       {!activeSession && (
-        <GlassCard intensity="medium" padding="lg" className="rounded-[26px] space-y-4">
+        <motion.div
+          initial={prefersReducedMotion ? false : { opacity: 0, y: 14, scale: 0.97 }}
+          animate={{ opacity: 1, y: 0, scale: 1 }}
+          transition={
+            prefersReducedMotion
+              ? { duration: 0 }
+              : { type: 'spring', stiffness: 300, damping: 26 }
+          }
+        >
+        <GlassCard intensity="medium" padding="lg" className="relative overflow-hidden rounded-[26px] space-y-4">
+          {!prefersReducedMotion && (
+            <motion.div
+              aria-hidden="true"
+              initial={{ x: '-120%', opacity: 0.55 }}
+              animate={{ x: '160%', opacity: 0 }}
+              transition={{ duration: 0.95, ease: [0.16, 1, 0.3, 1] }}
+              className="pointer-events-none absolute inset-y-0 w-1/2 -skew-x-12 bg-gradient-to-r from-transparent via-white/30 dark:via-cyan-200/15 to-transparent"
+            />
+          )}
           <div className="relative z-10 flex items-start justify-between gap-3">
             <div>
               <h3 className="text-base font-display font-bold text-[var(--nx-text-primary)] flex items-center gap-2">
@@ -302,6 +332,7 @@ export function DeepTalkCardsView({
             <span>{busy ? 'Creating Invitation...' : `Invite ${peerUser.displayName} to Deep Talk`}</span>
           </GlassButton>
         </GlassCard>
+        </motion.div>
       )}
 
       {/* Completed Answers in Current or Past Sessions */}
@@ -347,6 +378,6 @@ export function DeepTalkCardsView({
             })}
         </div>
       )}
-    </div>
+    </motion.div>
   );
 }

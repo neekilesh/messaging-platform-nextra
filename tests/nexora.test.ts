@@ -697,4 +697,126 @@ describe('NEXORA Full-Stack Integration & Security Suite', () => {
     const storiesAfter = await api('/api/v1/stories', {}, u2.token);
     assert.equal(storiesAfter.data.stories.length, 0);
   });
+
+  test('Per-Chat Theme Settings: custom color gradients persist per conversation & per user', async () => {
+    const alice = await registerUser('theme_a@nexora.test', 'ThemeAlice');
+    const bob = await registerUser('theme_b@nexora.test', 'ThemeBob');
+    const carol = await registerUser('theme_c@nexora.test', 'ThemeCarol');
+
+    const convAB = await api(
+      '/api/v1/conversations/private',
+      { method: 'POST', body: JSON.stringify({ userId: bob.user.id }) },
+      alice.token
+    );
+    assert.equal(convAB.status, 201);
+    const convABId = convAB.data.conversationId as string;
+
+    const convAC = await api(
+      '/api/v1/conversations/private',
+      { method: 'POST', body: JSON.stringify({ userId: carol.user.id }) },
+      alice.token
+    );
+    assert.equal(convAC.status, 201);
+    const convACId = convAC.data.conversationId as string;
+
+    // Invalid hex color payload is rejected with 400
+    const badPatch = await api(
+      `/api/v1/conversations/${convABId}/settings`,
+      {
+        method: 'PATCH',
+        body: JSON.stringify({
+          chatTheme: {
+            presetId: 'custom',
+            backgroundStart: 'javascript:alert(1)',
+            backgroundEnd: '#112233',
+            outgoingBubbleStart: '#8b5cf6',
+            outgoingBubbleEnd: '#4f46e5',
+          },
+        }),
+      },
+      alice.token
+    );
+    assert.equal(badPatch.status, 400);
+
+    // Non-participant cannot modify settings (403)
+    const carolPatchAB = await api(
+      `/api/v1/conversations/${convABId}/settings`,
+      {
+        method: 'PATCH',
+        body: JSON.stringify({
+          chatTheme: {
+            presetId: 'custom',
+            backgroundStart: '#140b2e',
+            backgroundEnd: '#0d1b3a',
+            backgroundAngle: 145,
+            outgoingBubbleStart: '#8b5cf6',
+            outgoingBubbleEnd: '#4f46e5',
+            outgoingAngle: 135,
+          },
+        }),
+      },
+      carol.token
+    );
+    assert.equal(carolPatchAB.status, 403);
+
+    // Alice saves custom gradient theme on convAB only
+    const saveAB = await api(
+      `/api/v1/conversations/${convABId}/settings`,
+      {
+        method: 'PATCH',
+        body: JSON.stringify({
+          chatTheme: {
+            presetId: 'custom',
+            backgroundStart: '#061A24',
+            backgroundVia: '#0b2f3f',
+            backgroundEnd: '#0d1a38',
+            backgroundAngle: 150,
+            outgoingBubbleStart: '#0891b2',
+            outgoingBubbleEnd: '#2563eb',
+            outgoingAngle: 120,
+            incomingBubbleTint: 'frosted-dark',
+          },
+        }),
+      },
+      alice.token
+    );
+    assert.equal(saveAB.status, 200);
+    assert.equal(saveAB.data.chatTheme?.backgroundStart, '#061a24');
+
+    // Alice sees custom theme on convAB, null on convAC
+    const aliceList = await api('/api/v1/conversations', {}, alice.token);
+    assert.equal(aliceList.status, 200);
+    const aliceAB = aliceList.data.conversations.find((c: { id: string }) => c.id === convABId);
+    const aliceAC = aliceList.data.conversations.find((c: { id: string }) => c.id === convACId);
+    assert.equal(aliceAB?.chatTheme?.backgroundStart, '#061a24');
+    assert.equal(aliceAB?.chatTheme?.incomingBubbleTint, 'frosted-dark');
+    assert.equal(aliceAC?.chatTheme, null);
+
+    // Bob's view of convAB also reflects the shared conversation theme
+    const bobList = await api('/api/v1/conversations', {}, bob.token);
+    const bobAB = bobList.data.conversations.find((c: { id: string }) => c.id === convABId);
+    assert.equal(bobAB?.chatTheme?.backgroundStart, '#061a24');
+    assert.equal(bobAB?.chatTheme?.incomingBubbleTint, 'frosted-dark');
+
+    // Alice resets convAB theme back to default (null)
+    const resetAB = await api(
+      `/api/v1/conversations/${convABId}/settings`,
+      {
+        method: 'PATCH',
+        body: JSON.stringify({ chatTheme: null }),
+      },
+      alice.token
+    );
+    assert.equal(resetAB.status, 200);
+    assert.equal(resetAB.data.chatTheme, null);
+
+    const aliceListAfter = await api('/api/v1/conversations', {}, alice.token);
+    const aliceABAfter = aliceListAfter.data.conversations.find((c: { id: string }) => c.id === convABId);
+    assert.equal(aliceABAfter?.chatTheme, null);
+
+    const bobListAfter = await api('/api/v1/conversations', {}, bob.token);
+    const bobABAfter = bobListAfter.data.conversations.find((c: { id: string }) => c.id === convABId);
+    assert.equal(bobABAfter?.chatTheme, null);
+  });
 });
+

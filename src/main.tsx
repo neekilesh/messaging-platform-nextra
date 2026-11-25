@@ -6,7 +6,25 @@ import { VisualPrefsProvider } from './lib/theme.tsx';
 import { CursorParticleTrail } from './components/ui/CursorParticleTrail.tsx';
 import './index.css';
 
-registerSW({ immediate: true });
+if (typeof window !== 'undefined' && 'serviceWorker' in navigator) {
+  let reloading = false;
+  navigator.serviceWorker.addEventListener('controllerchange', () => {
+    if (reloading) return;
+    reloading = true;
+    window.location.reload();
+  });
+}
+
+const updateSW = registerSW({
+  immediate: true,
+  onNeedRefresh() {
+    void updateSW(true);
+  },
+  onRegisteredSW(_swUrl, registration) {
+    if (!registration) return;
+    void registration.update().catch(() => {});
+  },
+});
 
 if (typeof window !== 'undefined') {
   (window as unknown as { gm_authFailure?: () => void }).gm_authFailure = () => {

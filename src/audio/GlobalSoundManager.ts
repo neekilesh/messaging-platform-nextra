@@ -21,6 +21,49 @@ declare global {
   }
 }
 
+export interface AudioDiagnosticSnapshot {
+  audioContextSupported: boolean;
+  offlineContextSupported: boolean;
+  contextState: 'uninitialized' | AudioContextState;
+  sampleRate: number | null;
+  baseLatencyMs: number | null;
+  outputLatencyMs: number | null;
+  masterGainValue: number;
+  targetGainValue: number;
+  effectiveVolume: number;
+  activeVoices: number;
+  maxPolyphony: number;
+  voiceRecordingInterlock: boolean;
+  cachedBufferCount: number;
+  totalRegisteredSounds: number;
+  isMuted: boolean;
+  awakeningPlayed: boolean;
+}
+
+export type DiagnosticBlockReason =
+  | 'played-buffer'
+  | 'played-synthesized'
+  | 'resumed-and-played'
+  | 'muted'
+  | 'silent-profile'
+  | 'silent-pack'
+  | 'volume-zero'
+  | 'category-disabled'
+  | 'read-sound-disabled'
+  | 'recording-interlock'
+  | 'cooldown-active'
+  | 'unsupported'
+  | 'unknown-event';
+
+export interface DiagnosticPlayResult {
+  event: SoundEventId;
+  played: boolean;
+  reason: DiagnosticBlockReason;
+  contextState: 'uninitialized' | AudioContextState;
+  effectiveGain: number;
+  timestamp: number;
+}
+
 export class GlobalSoundManager {
   private settings: SoundSettings = loadSoundSettings();
   private subscribers = new Set<(s: SoundSettings) => void>();
@@ -236,13 +279,17 @@ export class GlobalSoundManager {
     this.unlockListenersBound = true;
 
     const unlockGesture = () => {
-      this.ensureContext();
-      if (this.ctx && this.ctx.state === 'suspended') {
-        this.ctx.resume().catch(() => {});
-      }
-      if (!this.awakeningPlayed && this.ctx && this.ctx.state === 'running') {
-        this.awakeningPlayed = true;
-        this.play('app.awakening');
+      try {
+        this.ensureContext();
+        if (this.ctx && this.ctx.state === 'suspended') {
+          this.ctx.resume().catch(() => {});
+        }
+        if (!this.awakeningPlayed && this.ctx && this.ctx.state === 'running') {
+          this.awakeningPlayed = true;
+          this.play('app.awakening');
+        }
+      } catch {
+        // never let audio initialization interfere with user gestures
       }
     };
 
@@ -272,30 +319,33 @@ export class GlobalSoundManager {
     document.addEventListener(
       'click',
       (e) => {
-        if (!this.settings.masterEnabled || !this.settings.uiEnabled) return;
-        const target = e.target as HTMLElement | null;
-        if (!target) return;
+        try {
+          if (!this.settings.masterEnabled || !this.settings.uiEnabled) return;
+          if (!(e.target instanceof Element)) return;
 
-        const interactive = target.closest(
-          'button, [role="button"], a[href], summary, [data-sound-click="true"]'
-        ) as HTMLElement | null;
-        if (!interactive) return;
+          const interactive = e.target.closest(
+            'button, [role="button"], a[href], summary, [data-sound-click="true"]'
+          ) as HTMLElement | null;
+          if (!interactive) return;
 
-        // Skip disabled elements or those marked to suppress default sound
-        if (
-          interactive.getAttribute('aria-disabled') === 'true' ||
-          (interactive as HTMLButtonElement).disabled ||
-          interactive.getAttribute('data-sound-none') === 'true' ||
-          interactive.getAttribute('data-sound-custom') === 'true'
-        ) {
-          return;
+          // Skip disabled elements or those marked to suppress default sound
+          if (
+            interactive.getAttribute('aria-disabled') === 'true' ||
+            (interactive as HTMLButtonElement).disabled ||
+            interactive.getAttribute('data-sound-none') === 'true' ||
+            interactive.getAttribute('data-sound-custom') === 'true'
+          ) {
+            return;
+          }
+
+          const now = performance.now();
+          if (now - this.lastDelegatedClickTime < 45) return;
+          this.lastDelegatedClickTime = now;
+
+          this.play('ui.click');
+        } catch {
+          // audio playback must never interrupt click dispatch
         }
-
-        const now = performance.now();
-        if (now - this.lastDelegatedClickTime < 45) return;
-        this.lastDelegatedClickTime = now;
-
-        this.play('ui.click');
       },
       { capture: true, passive: true }
     );
@@ -742,6 +792,208 @@ export class GlobalSoundManager {
       this.getEffectiveCategoryMeta('notifications', this.settings.soundPack, this.settings.soundTheme),
       this.settings.soundTheme
     );
+  }
+
+  // ---------------------------------------------------------------------------
+  // Diagnostics & Browser Environment Testing API
+  // ---------------------------------------------------------------------------
+
+  getDiagnostics(): AudioDiagnosticSnapshot {
+    const hasWindow = typeof window !== 'undefined';
+    const audioContextSupported =
+      hasWindow &&
+      Boolean(
+        window.AudioContext ||
+          (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext
+      );
+    const offlineContextSupported = typeof OfflineAudioContext !== 'undefined';
+
+    const ctx = this.ctx as (AudioContext & { outputLatency?: number }) | null;
+    const targetGainValue = this.settings.masterEnabled ? Number((this.settings.volume * 0.45).toFixed(3)) : 0;
+
+    return {
+      audioContextSupported,
+      offlineContextSupported,
+      contextState: ctx ? ctx.state : 'uninitialized',
+      sampleRate: ctx?.sampleRate ?? null,
+      baseLatencyMs:
+        ctx && typeof ctx.baseLatency === 'number' && Number.isFinite(ctx.baseLatency)
+          ? Number((ctx.baseLatency * 1000).toFixed(1))
+          : null,
+      outputLatencyMs:
+        ctx && typeof ctx.outputLatency === 'number' && Number.isFinite(ctx.outputLatency)
+          ? Number((ctx.outputLatency * 1000).toFixed(1))
+          : null,
+      masterGainValue: this.masterGain ? Number(this.masterGain.gain.value.toFixed(3)) : 0,
+      targetGainValue,
+      effectiveVolume: this.settings.masterEnabled ? this.settings.volume : 0,
+      activeVoices: this.activeOscillatorsCount,
+      maxPolyphony: this.maxPolyphony,
+      voiceRecordingInterlock: this.voiceRecordingActive,
+      cachedBufferCount: audioPreloader.getCachedCount(),
+      totalRegisteredSounds: Object.keys(SOUND_REGISTRY).length,
+      isMuted: this.isMuted(),
+      awakeningPlayed: this.awakeningPlayed,
+    };
+  }
+
+  isSoundCached(event: SoundEventId): boolean {
+    const def = SOUND_REGISTRY[event];
+    if (!def) return false;
+    const pack = this.getEffectiveCategoryMeta(def.category, this.settings.soundPack, this.settings.soundTheme);
+    return audioPreloader.hasCached(pack.id, event);
+  }
+
+  getEventBlockingReason(event: SoundEventId): DiagnosticBlockReason | null {
+    const def = SOUND_REGISTRY[event];
+    if (!def) return 'unknown-event';
+    if (this.voiceRecordingActive && def.category !== 'voiceUi') return 'recording-interlock';
+    if (!this.settings.masterEnabled) return 'muted';
+    if (this.settings.profile === 'silent') return 'silent-profile';
+    if (this.settings.soundPack === 'silent') return 'silent-pack';
+    if (this.settings.volume <= 0.01) return 'volume-zero';
+    if (event === 'message.read' && !this.settings.readSoundEnabled) return 'read-sound-disabled';
+    if (!this.isCategoryAllowed(def.category, event)) return 'category-disabled';
+    return null;
+  }
+
+  async initializeAudio(): Promise<AudioDiagnosticSnapshot> {
+    const audio = this.ensureContext();
+    if (audio && audio.ctx.state === 'suspended') {
+      try {
+        await audio.ctx.resume();
+      } catch {
+        // ignore browser autoplay rejection
+      }
+    }
+    this.preloadAll();
+    return this.getDiagnostics();
+  }
+
+  async preloadAllRegistered(): Promise<AudioDiagnosticSnapshot> {
+    const audio = this.ensureContext();
+    const sampleRate = audio?.ctx.sampleRate || 44100;
+    const events = Object.keys(SOUND_REGISTRY) as SoundEventId[];
+    await audioPreloader.preloadEvents(events, sampleRate, (ev) => {
+      const def = SOUND_REGISTRY[ev];
+      const themeId = this.resolveCategoryThemeId(def.category);
+      const pack = this.getEffectiveCategoryMeta(def.category, this.settings.soundPack, themeId);
+      return { pack, themeId };
+    });
+    return this.getDiagnostics();
+  }
+
+  resetDiagnosticsState(): void {
+    this.lastPlayedAt.clear();
+    if (this.voiceRecordingActive) {
+      this.setVoiceRecordingActive(false);
+    }
+  }
+
+  async playDiagnostic(
+    event: SoundEventId,
+    options?: { bypassFilters?: boolean }
+  ): Promise<DiagnosticPlayResult> {
+    const def = SOUND_REGISTRY[event];
+    const timestamp = Date.now();
+    if (!def) {
+      return {
+        event,
+        played: false,
+        reason: 'unknown-event',
+        contextState: this.ctx ? this.ctx.state : 'uninitialized',
+        effectiveGain: 0,
+        timestamp,
+      };
+    }
+
+    const bypass = Boolean(options?.bypassFilters);
+    if (!bypass) {
+      const blockReason = this.getEventBlockingReason(event);
+      if (blockReason) {
+        return {
+          event,
+          played: false,
+          reason: blockReason,
+          contextState: this.ctx ? this.ctx.state : 'uninitialized',
+          effectiveGain: 0,
+          timestamp,
+        };
+      }
+      const now = performance.now();
+      const prev = this.lastPlayedAt.get(event) ?? 0;
+      if (now - prev < def.cooldownMs) {
+        return {
+          event,
+          played: false,
+          reason: 'cooldown-active',
+          contextState: this.ctx ? this.ctx.state : 'uninitialized',
+          effectiveGain: 0,
+          timestamp,
+        };
+      }
+      this.lastPlayedAt.set(event, now);
+    }
+
+    const effectivePackId: SoundPackId =
+      bypass && this.settings.soundPack === 'silent' ? 'nexora-default' : this.settings.soundPack;
+    const resolvedThemeId = this.resolveCategoryThemeId(def.category);
+    const pack = this.getEffectiveCategoryMeta(def.category, effectivePackId, resolvedThemeId);
+
+    const audio = this.ensureContext();
+    if (!audio) {
+      return {
+        event,
+        played: false,
+        reason: 'unsupported',
+        contextState: 'uninitialized',
+        effectiveGain: 0,
+        timestamp,
+      };
+    }
+
+    const { ctx, master } = audio;
+    let wasResumed = false;
+    if (ctx.state === 'suspended') {
+      try {
+        await ctx.resume();
+        wasResumed = true;
+      } catch {
+        return {
+          event,
+          played: false,
+          reason: 'unsupported',
+          contextState: ctx.state,
+          effectiveGain: 0,
+          timestamp,
+        };
+      }
+    }
+
+    // In diagnostic mode, honor the live volume slider so users can directly test volume controls
+    const gainMultiplier = bypass
+      ? Math.max(0.02, this.settings.volume) * 0.45
+      : this.settings.masterEnabled
+      ? this.settings.volume * 0.45
+      : 0;
+    try {
+      master.gain.cancelScheduledValues(ctx.currentTime);
+      master.gain.setValueAtTime(gainMultiplier, ctx.currentTime);
+    } catch {
+      // ignore audio param error
+    }
+
+    const hadCache = Boolean(audioPreloader.getCached(pack.id, event));
+    this.executeSoundPlayback(event, def, pack, resolvedThemeId);
+
+    return {
+      event,
+      played: true,
+      reason: wasResumed ? 'resumed-and-played' : hadCache ? 'played-buffer' : 'played-synthesized',
+      contextState: ctx.state,
+      effectiveGain: Number(gainMultiplier.toFixed(3)),
+      timestamp,
+    };
   }
 }
 

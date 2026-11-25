@@ -55,6 +55,8 @@ export function PeoplePanel({ friends, requests, onStartChat, onRefresh }: Peopl
         `/api/v1/users/search?q=${encodeURIComponent(clean)}`
       );
       setResults(res.users);
+    } catch (err) {
+      setStatusMsg(err instanceof Error ? err.message : 'Search failed.');
     } finally {
       setSearching(false);
     }
@@ -82,18 +84,23 @@ export function PeoplePanel({ friends, requests, onStartChat, onRefresh }: Peopl
   };
 
   const respondRequest = async (requestId: string, action: 'accept' | 'reject') => {
-    await apiRequest(`/api/v1/friends/requests/${requestId}/respond`, {
-      method: 'POST',
-      body: JSON.stringify({ action }),
-    });
-    if (action === 'accept') {
-      setStatusMsg('Connection accepted! Encrypted chat & connection games unlocked.');
-      setCelebrateKey(Date.now());
-      audioManager.play('friend.request_accept');
-    } else {
-      audioManager.play('friend.request_decline');
+    setStatusMsg(null);
+    try {
+      await apiRequest(`/api/v1/friends/requests/${requestId}/respond`, {
+        method: 'POST',
+        body: JSON.stringify({ action }),
+      });
+      if (action === 'accept') {
+        setStatusMsg('Connection accepted! Encrypted chat & connection games unlocked.');
+        setCelebrateKey(Date.now());
+        audioManager.play('friend.request_accept');
+      } else {
+        audioManager.play('friend.request_decline');
+      }
+      onRefresh();
+    } catch (err) {
+      setStatusMsg(err instanceof Error ? err.message : 'Could not respond to request.');
     }
-    onRefresh();
   };
 
   const openProfile = (user: PublicUser) => {

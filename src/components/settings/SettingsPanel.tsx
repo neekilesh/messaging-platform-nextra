@@ -56,6 +56,7 @@ import {
   ThemeSelector,
 } from '../ui/LiquidGlass';
 import { PWAInstallButton } from '../ui/PWAInstallButton';
+import { SoundDiagnostics } from '../audio/SoundDiagnostics';
 
 interface SettingsPanelProps {
   user: AuthUser;
@@ -1123,6 +1124,8 @@ export function SettingsPanel({
               ))}
             </div>
           </GlassCard>
+
+          <SoundDiagnostics />
         </div>
       )}
 

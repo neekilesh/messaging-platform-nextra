@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { AnimatePresence, motion } from 'motion/react';
 import {
   Calendar,
@@ -9,7 +9,6 @@ import {
   Clock,
   Compass,
   Feather,
-  Flame,
   Heart,
   History,
   MessageSquarePlus,
@@ -18,7 +17,6 @@ import {
   Smile,
   Sparkles,
   Sun,
-  Trophy,
   X,
 } from 'lucide-react';
 import { audioManager } from '../../audio/AudioManager';
@@ -35,7 +33,8 @@ import type {
   DailyConnectionStreak,
   PublicUser,
 } from '../../types/nexora';
-import { GlassButton, GlassCard, ProfileAvatar } from '../ui/LiquidGlass';
+import { GlassButton, ProfileAvatar } from '../ui/LiquidGlass';
+import { StreakCounter, StreakMilestoneOverlay } from './StreakCounter';
 
 interface DailyChallengeViewProps {
   conversationId: string;
@@ -113,8 +112,31 @@ export function DailyChallengeView({
   const [busy, setBusy] = useState(false);
   const [rippleKey, setRippleKey] = useState<number | null>(null);
   const [celebrateKey, setCelebrateKey] = useState<number | null>(null);
+  const [activeMilestone, setActiveMilestone] = useState<number | null>(null);
+  const dismissedMilestonesRef = useRef<Set<string>>(new Set());
   const [showHistory, setShowHistory] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    const milestone = connectionStreak.milestoneReached;
+    if (!milestone) {
+      setActiveMilestone(null);
+      return;
+    }
+    const key = `${todayChallenge?.id || 'streak'}:${milestone}`;
+    if (!dismissedMilestonesRef.current.has(key)) {
+      setActiveMilestone(milestone);
+    }
+  }, [connectionStreak.milestoneReached, todayChallenge?.id]);
+
+  const handleDismissMilestone = () => {
+    if (activeMilestone !== null) {
+      const key = `${todayChallenge?.id || 'streak'}:${activeMilestone}`;
+      dismissedMilestonesRef.current.add(key);
+    }
+    audioManager.play('ui.glass_touch');
+    setActiveMilestone(null);
+  };
 
   const handleSubmitResponse = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -154,6 +176,11 @@ export function DailyChallengeView({
       if (completedBoth) {
         audioManager.play('achievement.streak_milestone');
         if (!prefersReducedMotion) setCelebrateKey(Date.now());
+        if (res.connectionStreak?.milestoneReached) {
+          const milestone = res.connectionStreak.milestoneReached;
+          dismissedMilestonesRef.current.delete(`${decrypted.id}:${milestone}`);
+          setActiveMilestone(milestone);
+        }
       } else {
         audioManager.play('message.send');
       }
@@ -233,75 +260,8 @@ export function DailyChallengeView({
         </div>
       )}
 
-      {/* Daily Connection Streak Banner (completely separate from general chat streaks) */}
-      <GlassCard
-        intensity="medium"
-        padding="md"
-        className="rounded-[24px] border border-cyan-400/30 dark:border-violet-400/25 shadow-[0_12px_34px_rgba(78,124,255,0.14)]"
-      >
-        <div className="relative z-10 space-y-3">
-          <div className="flex items-center justify-between gap-3">
-            <div className="flex items-center gap-2.5">
-              <div className="w-10 h-10 rounded-2xl bg-gradient-to-br from-violet-500/25 via-sky-500/20 to-cyan-400/25 border border-white/50 dark:border-white/15 flex items-center justify-center shrink-0">
-                <Flame className="w-5 h-5 text-violet-600 dark:text-cyan-300" />
-              </div>
-              <div>
-                <div className="text-[11px] font-mono uppercase tracking-[0.14em] text-violet-700 dark:text-cyan-300">
-                  Daily Connection Streak
-                </div>
-                <div className="text-xs text-[var(--nx-text-secondary)]">
-                  Grows when both of you finish today&apos;s challenge
-                </div>
-              </div>
-            </div>
-            {connectionStreak.nextMilestone && (
-              <div className="text-right shrink-0">
-                <div className="text-[10px] uppercase tracking-wider text-[var(--nx-text-muted)]">
-                  Next Milestone
-                </div>
-                <div className="text-xs font-mono-tabular font-semibold text-violet-700 dark:text-cyan-300">
-                  {connectionStreak.nextMilestone} days
-                </div>
-              </div>
-            )}
-          </div>
-
-          <div className="grid grid-cols-3 gap-2">
-            <div className="rounded-2xl nexora-glass-subtle px-3 py-2 text-center">
-              <div className="text-lg font-display font-bold font-mono-tabular text-[var(--nx-text-primary)]">
-                {connectionStreak.currentStreak}
-              </div>
-              <div className="text-[10px] text-[var(--nx-text-secondary)]">Current</div>
-            </div>
-            <div className="rounded-2xl nexora-glass-subtle px-3 py-2 text-center">
-              <div className="text-lg font-display font-bold font-mono-tabular text-[var(--nx-text-primary)]">
-                {connectionStreak.longestStreak}
-              </div>
-              <div className="text-[10px] text-[var(--nx-text-secondary)]">Longest</div>
-            </div>
-            <div className="rounded-2xl nexora-glass-subtle px-3 py-2 text-center">
-              <div className="text-lg font-display font-bold font-mono-tabular text-[var(--nx-text-primary)]">
-                {connectionStreak.totalCompleted}
-              </div>
-              <div className="text-[10px] text-[var(--nx-text-secondary)]">Completed</div>
-            </div>
-          </div>
-
-          {connectionStreak.milestoneReached && (
-            <motion.div
-              initial={prefersReducedMotion ? false : { opacity: 0, scale: 0.95, y: 4 }}
-              animate={{ opacity: 1, scale: 1, y: 0 }}
-              className="rounded-2xl bg-gradient-to-r from-violet-500/20 via-sky-500/20 to-cyan-400/20 border border-cyan-300/45 px-3.5 py-2.5 flex items-center gap-2.5"
-            >
-              <Trophy className="w-4 h-4 text-amber-500 dark:text-amber-300 shrink-0" />
-              <div className="text-xs text-[var(--nx-text-primary)] font-medium">
-                <span className="font-mono-tabular font-bold">{connectionStreak.milestoneReached}-Day</span>{' '}
-                Connection Milestone Unlocked!
-              </div>
-            </motion.div>
-          )}
-        </div>
-      </GlassCard>
+      {/* Daily Connection Streak Counter */}
+      <StreakCounter connectionStreak={connectionStreak} variant="detailed" />
 
       {/* Today's Challenge Floating Interactive Card */}
       {todayChallenge ? (
@@ -312,6 +272,12 @@ export function DailyChallengeView({
           transition={{ duration: 0.28, ease: [0.16, 1, 0.3, 1] }}
           className="relative rounded-[28px] p-5 sm:p-6 nexora-glass-elevated border border-sky-400/35 dark:border-cyan-400/25 shadow-[0_18px_48px_rgba(74,116,245,0.18)] overflow-hidden"
         >
+          <StreakMilestoneOverlay
+            milestone={activeMilestone}
+            peerName={peerUser.displayName}
+            onDismiss={handleDismissMilestone}
+          />
+
           <div
             aria-hidden="true"
             className="pointer-events-none absolute -top-24 -left-20 w-56 h-56 rounded-full bg-gradient-to-br from-sky-400/20 via-violet-500/15 to-cyan-300/10 blur-2xl"

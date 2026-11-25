@@ -212,10 +212,14 @@ export function StoryViewer({
   };
 
   const handleDelete = async () => {
-    audioManager.play('story.delete');
-    await apiRequest(`/api/v1/stories/${story.id}`, { method: 'DELETE' });
-    onRefresh();
-    onClose();
+    try {
+      audioManager.play('story.delete');
+      await apiRequest(`/api/v1/stories/${story.id}`, { method: 'DELETE' });
+      onRefresh();
+      onClose();
+    } catch (err) {
+      setFeedback(err instanceof Error ? err.message : 'Could not delete story.');
+    }
   };
 
   const handleTouchStart = (e: React.TouchEvent) => {

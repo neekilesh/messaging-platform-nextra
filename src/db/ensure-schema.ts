@@ -14,6 +14,8 @@ export function ensureDatabaseSchema(database: PgDatabase): Promise<boolean> {
             AND table_name IN (
               'users',
               'privacy_settings',
+              'conversations',
+              'conversation_participants',
               'deep_talk_questions',
               'deep_talk_sessions',
               'deep_talk_answers',
@@ -36,11 +38,25 @@ export function ensureDatabaseSchema(database: PgDatabase): Promise<boolean> {
         const hasUserTzCol = rows.some(
           (r) => r.table_name === 'users' && r.column_name === 'timezone'
         );
+        const hasConvChatThemeCol = rows.some(
+          (r) =>
+            r.table_name === 'conversations' &&
+            r.column_name === 'chat_theme_json'
+        );
+        const hasChatThemeCol = rows.some(
+          (r) =>
+            r.table_name === 'conversation_participants' &&
+            r.column_name === 'chat_theme_json'
+        );
         if (
           tablesPresent.has('users') &&
           hasUserTzCol &&
           tablesPresent.has('privacy_settings') &&
           hasGamesCol &&
+          tablesPresent.has('conversations') &&
+          hasConvChatThemeCol &&
+          tablesPresent.has('conversation_participants') &&
+          hasChatThemeCol &&
           tablesPresent.has('deep_talk_questions') &&
           tablesPresent.has('deep_talk_sessions') &&
           tablesPresent.has('deep_talk_answers') &&
@@ -226,10 +242,12 @@ export function ensureDatabaseSchema(database: PgDatabase): Promise<boolean> {
             group_id text UNIQUE REFERENCES groups(id) ON DELETE CASCADE,
             private_pair_key text UNIQUE,
             disappearing_seconds integer NOT NULL DEFAULT 0,
+            chat_theme_json text,
             last_message_at text,
             created_at text NOT NULL,
             updated_at text NOT NULL
           );
+          ALTER TABLE conversations ADD COLUMN IF NOT EXISTS chat_theme_json text;
 
           CREATE TABLE IF NOT EXISTS conversation_participants (
             id text PRIMARY KEY,
@@ -238,9 +256,11 @@ export function ensureDatabaseSchema(database: PgDatabase): Promise<boolean> {
             muted integer NOT NULL DEFAULT 0,
             archived integer NOT NULL DEFAULT 0,
             unread_count integer NOT NULL DEFAULT 0,
+            chat_theme_json text,
             last_read_at text,
             joined_at text NOT NULL
           );
+          ALTER TABLE conversation_participants ADD COLUMN IF NOT EXISTS chat_theme_json text;
           CREATE INDEX IF NOT EXISTS idx_conv_participants_user ON conversation_participants (user_id);
           CREATE UNIQUE INDEX IF NOT EXISTS idx_conv_participants_unique ON conversation_participants (conversation_id, user_id);
 

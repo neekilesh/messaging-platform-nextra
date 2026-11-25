@@ -31,10 +31,17 @@ function getActivityIcon(type: string) {
 }
 
 export function NotificationsPanel({ notifications, onRefresh }: NotificationsPanelProps) {
+  const [error, setError] = React.useState<string | null>(null);
+
   const markAllRead = async () => {
-    audioManager.play('ui.settings_saved');
-    await apiRequest('/api/v1/notifications/read-all', { method: 'POST' });
-    onRefresh();
+    setError(null);
+    try {
+      audioManager.play('ui.settings_saved');
+      await apiRequest('/api/v1/notifications/read-all', { method: 'POST' });
+      onRefresh();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to mark notifications as read.');
+    }
   };
 
   return (
@@ -55,6 +62,15 @@ export function NotificationsPanel({ notifications, onRefresh }: NotificationsPa
           </GlassButton>
         )}
       </div>
+
+      {error && (
+        <div
+          role="alert"
+          className="rounded-2xl border border-rose-500/35 bg-rose-500/10 px-3.5 py-2 text-xs text-rose-700 dark:text-rose-200"
+        >
+          {error}
+        </div>
+      )}
 
       {notifications.length === 0 ? (
         <GlassCard intensity="subtle" className="py-12 text-center space-y-2.5">

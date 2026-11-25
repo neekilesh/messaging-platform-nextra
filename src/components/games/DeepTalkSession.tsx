@@ -438,10 +438,22 @@ export function DeepTalkSession({
         ) : (
           <motion.div
             key={`active-${session.id}-${card?.question.id || 'done'}`}
-            initial={prefersReducedMotion ? false : { opacity: 0, y: 14, scale: 0.97 }}
-            animate={{ opacity: 1, y: 0, scale: 1 }}
-            exit={prefersReducedMotion ? undefined : { opacity: 0, y: -10, scale: 0.97 }}
-            transition={{ duration: 0.28, ease: [0.16, 1, 0.3, 1] }}
+            initial={
+              prefersReducedMotion
+                ? false
+                : { opacity: 0, y: 18, scale: 0.95, filter: 'blur(8px)' }
+            }
+            animate={{ opacity: 1, y: 0, scale: 1, filter: 'blur(0px)' }}
+            exit={
+              prefersReducedMotion
+                ? undefined
+                : { opacity: 0, y: -10, scale: 0.96, filter: 'blur(4px)' }
+            }
+            transition={
+              prefersReducedMotion
+                ? { duration: 0 }
+                : { type: 'spring', stiffness: 290, damping: 24 }
+            }
           >
             {/* Floating Glossy Liquid-Glass Question Card */}
             <div
@@ -463,6 +475,18 @@ export function DeepTalkSession({
                 className="pointer-events-none absolute -bottom-24 -left-20 w-48 h-48 rounded-full bg-gradient-to-tr from-cyan-400/14 via-violet-500/12 to-transparent blur-2xl"
               />
 
+              {/* Glossy Liquid-Glass Entry Specular Sweep */}
+              {!prefersReducedMotion && (
+                <motion.div
+                  key={`entry-gloss-${session.id}-${card?.question.id || 'done'}`}
+                  initial={{ x: '-130%', opacity: 0.65 }}
+                  animate={{ x: '170%', opacity: 0 }}
+                  transition={{ duration: 0.9, ease: [0.16, 1, 0.3, 1] }}
+                  aria-hidden="true"
+                  className="pointer-events-none absolute inset-y-0 w-1/2 -skew-x-12 bg-gradient-to-r from-transparent via-white/35 dark:via-cyan-200/18 to-transparent"
+                />
+              )}
+
               {/* Answer Submit Energy Ripple */}
               {rippleKey && !prefersReducedMotion && (
                 <motion.div
@@ -475,16 +499,26 @@ export function DeepTalkSession({
                 />
               )}
 
-              {/* Synchronized Mutual Reveal Luminous Sweep */}
+              {/* Synchronized Mutual Reveal Luminous Sweep + Expanding Aura Ring */}
               {revealGlowKey && !prefersReducedMotion && (
-                <motion.div
-                  key={revealGlowKey}
-                  initial={{ x: '-110%', opacity: 0.75 }}
-                  animate={{ x: '130%', opacity: 0 }}
-                  transition={{ duration: 0.85, ease: [0.16, 1, 0.3, 1] }}
-                  aria-hidden="true"
-                  className="pointer-events-none absolute inset-y-0 w-2/3 bg-gradient-to-r from-transparent via-cyan-300/25 to-transparent"
-                />
+                <>
+                  <motion.div
+                    key={`sweep-${revealGlowKey}`}
+                    initial={{ x: '-120%', opacity: 0.85 }}
+                    animate={{ x: '140%', opacity: 0 }}
+                    transition={{ duration: 0.95, ease: [0.16, 1, 0.3, 1] }}
+                    aria-hidden="true"
+                    className="pointer-events-none absolute inset-y-0 w-2/3 -skew-x-12 bg-gradient-to-r from-transparent via-cyan-300/30 to-transparent"
+                  />
+                  <motion.div
+                    key={`aura-${revealGlowKey}`}
+                    initial={{ scale: 0.82, opacity: 0.7 }}
+                    animate={{ scale: 1.06, opacity: 0 }}
+                    transition={{ duration: 0.85, ease: [0.16, 1, 0.3, 1] }}
+                    aria-hidden="true"
+                    className="pointer-events-none absolute inset-0 rounded-[26px] border-2 border-cyan-300/75 shadow-[inset_0_0_28px_rgba(34,211,238,0.28)]"
+                  />
+                </>
               )}
 
               <div className="relative z-10 space-y-3.5">
